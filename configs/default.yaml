@@ -1,0 +1,52 @@
+paths:
+  raw_mot_fly: "data/raw/mot_fly"
+  raw_a2a_uav: "data/raw/a2a_uav_tracking"
+  processed_data: "data/processed"
+  splits: "data/splits"
+  weights_dir: "weights"
+  output_videos: "outputs/videos"
+  output_tracks: "outputs/tracks"
+  output_metrics: "outputs/metrics"
+  output_plots: "outputs/plots"
+
+fast_mode:
+  model_weights: "weights/yolov8n.pt"
+  imgsz: 640
+  detect_every_n_frames: 3
+  use_roi_crop: false
+
+robust_mode:
+  model_weights: "weights/yolov8s.pt"
+  imgsz: 1280
+  detect_every_n_frames: 1
+  use_roi_crop: true
+
+features:
+  window_size: 5
+  feature_names:
+    - "laplacian_variance_blur"
+    - "mean_brightness"
+    - "brightness_contrast"
+    - "optical_flow_magnitude"
+    - "camera_motion_speed"
+    - "target_bbox_area"
+    - "target_aspect_ratio"
+    - "detection_confidence"
+
+selector:
+  n_estimators: 100
+  random_state: 42
+  max_depth: 10
+  model_save_path: "weights/selector_rf.joblib"
+
+hysteresis:
+  min_mode_duration: 15
+  persistence_frames: 5
+
+evaluation:
+  metrics:
+    - "HOTA"
+    - "IDF1"
+    - "MOTA"
+    - "IDSW"
+
