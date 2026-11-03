@@ -146,3 +146,4 @@ class MLSelector:
         df = pd.DataFrame([features])
         pred = self.model.predict(df)[0]
         return str(pred)
+

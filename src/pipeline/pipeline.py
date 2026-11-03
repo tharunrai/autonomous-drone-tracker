@@ -338,3 +338,4 @@ class TrackingPipeline:
             cv2.LINE_AA,
         )
         return frame
+

@@ -44,3 +44,4 @@ def finetune_detector(
         "finetune_detector is a placeholder. "
         "TODO: Supply custom dataset YAML and invoke `YOLO(base_weights).train(data=data_yaml, epochs=epochs)`."
     )
+

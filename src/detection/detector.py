@@ -64,3 +64,4 @@ class YOLODetector:
             verbose=False,
         )
         return results[0].boxes
+

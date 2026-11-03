@@ -173,3 +173,4 @@ class VideoWriterWrapper:
         """Close writer and re-encode to browser-playable H.264 MP4."""
         self.writer.release()
         return reencode_to_h264(self.raw_path, self.final_output_path)
+

@@ -90,3 +90,4 @@ class ByteTrackerWrapper:
         """Reset internal tracker state and trajectory history between video sequences."""
         self.tracker = self._init_tracker()
         self.track_history.clear()
+

@@ -89,3 +89,4 @@ class ConditionFeatureExtractor:
     def reset(self) -> None:
         """Reset historical optical flow state."""
         self.prev_gray_small = None
+
