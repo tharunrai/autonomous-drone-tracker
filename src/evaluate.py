@@ -78,3 +78,4 @@ def plot_mode_switching_timeline(
         Figure object displaying timeline.
     """
     raise NotImplementedError("plot_mode_switching_timeline is a stub.")
+

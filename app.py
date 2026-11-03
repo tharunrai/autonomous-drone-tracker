@@ -133,3 +133,4 @@ elif view_selection == "📊 Benchmark Results":
             }
         ).set_index("Method")
         st.bar_chart(bar_data)
+

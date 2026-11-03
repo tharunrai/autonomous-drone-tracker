@@ -108,3 +108,4 @@ class ModePredictor:
             Selected mode name ('FAST' or 'ROBUST').
         """
         raise NotImplementedError("ModePredictor.predict_mode is a stub.")
+

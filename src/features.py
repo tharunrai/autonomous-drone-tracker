@@ -94,3 +94,4 @@ class ConditionFeatureExtractor:
     def reset(self) -> None:
         """Reset temporal history buffer."""
         self._history.clear()
+
