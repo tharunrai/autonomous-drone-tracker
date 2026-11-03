@@ -21,3 +21,4 @@ echo Activating .venv and launching Streamlit...
 streamlit run app.py
 
 pause
+

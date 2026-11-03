@@ -20,21 +20,14 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Data directories (ignore data files but preserve directory structure and .gitkeep)
-data/raw/**
-!data/raw/**/
-!data/raw/**/.gitkeep
-
-data/processed/**
-!data/processed/**/
-!data/processed/**/.gitkeep
-
-data/splits/**
-!data/splits/**/
-!data/splits/**/.gitkeep
+# Data directories (ignore files, keep directory structure via .gitkeep)
+data/**
+!data/**/
+!data/**/.gitkeep
 
 # Model weights
 weights/*.pt
+weights/*.joblib
 weights/**
 !weights/**/
 !weights/**/.gitkeep

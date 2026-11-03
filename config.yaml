@@ -1,52 +1,42 @@
 paths:
-  raw_mot_fly: "data/raw/mot_fly"
-  raw_a2a_uav: "data/raw/a2a_uav_tracking"
-  processed_data: "data/processed"
-  splits: "data/splits"
   weights_dir: "weights"
-  output_videos: "outputs/videos"
-  output_tracks: "outputs/tracks"
-  output_metrics: "outputs/metrics"
-  output_plots: "outputs/plots"
+  uploads_dir: "data/uploads"
+  outputs_dir: "outputs"
+  metrics_dir: "outputs/metrics"
+  videos_dir: "outputs/videos"
+  plots_dir: "outputs/plots"
 
-fast_mode:
-  model_weights: "weights/yolov8n.pt"
-  imgsz: 640
-  detect_every_n_frames: 3
-  use_roi_crop: false
+modes:
+  fast:
+    weights: "weights/yolov8n.pt"
+    imgsz: 640
+    conf: 0.25
+    detect_every_n_frames: 3
+  robust:
+    weights: "weights/yolov8s.pt"
+    imgsz: 1280
+    conf: 0.20
+    detect_every_n_frames: 1
 
-robust_mode:
-  model_weights: "weights/yolov8s.pt"
-  imgsz: 1280
-  detect_every_n_frames: 1
-  use_roi_crop: true
+# Optional class filter IDs. Leave empty [] for no filter (detect all classes)
+classes: []
 
 features:
-  window_size: 5
-  feature_names:
-    - "laplacian_variance_blur"
-    - "mean_brightness"
-    - "brightness_contrast"
-    - "optical_flow_magnitude"
-    - "camera_motion_speed"
-    - "target_bbox_area"
-    - "target_aspect_ratio"
-    - "detection_confidence"
+  downscale_flow_width: 320
 
 selector:
-  n_estimators: 100
-  random_state: 42
-  max_depth: 10
-  model_save_path: "weights/selector_rf.joblib"
+  type: "rule_based"
+  ml_model_path: "weights/selector_rf.joblib"
+  rule_thresholds:
+    blur_threshold: 100.0         # Below this variance of Laplacian -> scene blurry -> push to ROBUST
+    area_ratio_threshold: 0.003   # Below this bbox/image area ratio -> tiny object -> push to ROBUST
+    conf_threshold: 0.45          # Below this mean detection confidence -> uncertain -> push to ROBUST
+    camera_motion_threshold: 3.5  # Above this mean optical flow magnitude -> fast camera -> push to ROBUST
 
 hysteresis:
   min_mode_duration: 15
   persistence_frames: 5
 
-evaluation:
-  metrics:
-    - "HOTA"
-    - "IDF1"
-    - "MOTA"
-    - "IDSW"
-
+tracking:
+  tracker_type: "bytetrack.yaml"
+  trail_length: 30
