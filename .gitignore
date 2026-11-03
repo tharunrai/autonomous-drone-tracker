@@ -20,7 +20,7 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# Data directories (ignore files but preserve directory structure and .gitkeep)
+# Data directories (ignore data files but preserve directory structure and .gitkeep)
 data/raw/**
 !data/raw/**/
 !data/raw/**/.gitkeep
@@ -43,20 +43,6 @@ weights/**
 outputs/**
 !outputs/**/
 !outputs/**/.gitkeep
-
-# Third-party cloned repositories
-third_party/TrackEval/
-third_party/TrackEval/**
-
-# Notebooks & Tests
-notebooks/**
-!notebooks/**/
-!notebooks/**/.gitkeep
-
-tests/**
-!tests/**/
-!tests/**/.gitkeep
-!tests/**/*.py
 
 # Catch-all rule for .gitkeep
 !.gitkeep

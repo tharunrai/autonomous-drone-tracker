@@ -45,10 +45,15 @@ A condition-aware adaptive perception system for Air-to-Air (A2A) UAV tracking t
 .
 ├── README.md
 ├── requirements.txt
-├── requirements.lock.txt
-├── .gitignore
-├── configs/
-│   └── default.yaml
+├── config.yaml
+├── run.py                # Unified CLI runner (check-setup, profile, features, train, evaluate)
+├── app.py                # Streamlit web app (overview, live demo simulation, results)
+├── src/
+│   ├── __init__.py
+│   ├── detect_track.py   # YOLO detector, ByteTrack, FAST/ROBUST modes, adaptive pipeline
+│   ├── features.py       # Blur, illumination, optical flow, and bbox geometry extractors
+│   ├── selector.py       # Label generator, RF selector training, inference, hysteresis
+│   └── evaluate.py       # Evaluation metrics, TrackEval wrapper, compute cost, plots
 ├── data/
 │   ├── raw/
 │   │   ├── mot_fly/
@@ -58,106 +63,55 @@ A condition-aware adaptive perception system for Air-to-Air (A2A) UAV tracking t
 ├── weights/
 │   ├── yolov8n.pt
 │   └── yolov8s.pt
-├── src/
-│   ├── __init__.py
-│   ├── detection/        # YOLO detector module (detector.py)
-│   ├── tracking/         # ByteTrack association module (tracker.py)
-│   ├── features/         # Blur, illumination, motion, scale extractors
-│   ├── selector/         # Labeling, training, inference, and hysteresis smoothing
-│   ├── pipeline/         # FAST, ROBUST, and Adaptive pipeline orchestrators
-│   ├── evaluation/       # TrackEval wrapper, compute profiling, plotting
-│   └── utils/            # Config parser, I/O helpers, logging setup
-├── scripts/
-│   ├── check_setup.py
-│   ├── profile_modes.py
-│   ├── extract_features.py
-│   ├── build_labels.py
-│   ├── train_selector.py
-│   └── run_experiments.py
-├── app/
-│   ├── streamlit_app.py  # Landing page
-│   └── pages/
-│       ├── 1_Demo.py     # Interactive video simulation & mode telemetry
-│       └── 2_Results.py  # Tracking quality vs compute trade-off dashboard
-├── outputs/
-│   ├── videos/
-│   ├── tracks/
-│   ├── metrics/
-│   └── plots/
-├── notebooks/
-├── tests/
-└── third_party/
-    └── TrackEval/        # Official TrackEval evaluation repository
+└── outputs/
+    ├── videos/
+    ├── tracks/
+    ├── metrics/
+    └── plots/
 ```
 
 ---
 
-## Setup Instructions
+## Setup & Quickstart
 
-### 1. Prerequisites
-- Python 3.10 or 3.11 (Python 3.11 recommended)
-- Git
-- NVIDIA GPU with CUDA drivers (optional, falls back to CPU if unavailable)
-
-### 2. Virtual Environment Setup
+### 1. Environment & Dependencies
 ```bash
-# Create virtual environment
-python -m venv .venv
-
 # Activate virtual environment
 # Windows (PowerShell):
 .venv\Scripts\Activate.ps1
 # Linux / macOS:
 source .venv/bin/activate
-```
 
-### 3. Install Dependencies
-```bash
-# If CUDA GPU is available (example for CUDA 12.4):
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-
-# Install base requirements
+# Install requirements
 pip install -r requirements.txt
 ```
 
-### 4. Clone TrackEval
+### 2. Verify Environment & GPU
+Run the verification check:
 ```bash
-git clone https://github.com/JonathonLuiten/TrackEval.git third_party/TrackEval
-pip install -r third_party/TrackEval/requirements.txt
+python run.py --check-setup
 ```
 
-### 5. Download Model Weights
-Download the baseline model checkpoints into `weights/`:
+### 3. Launch Streamlit Application
 ```bash
-python -c "from ultralytics import YOLO; YOLO('yolov8n.pt'); YOLO('yolov8s.pt')"
-# Move weights to weights/ directory if not downloaded directly
+streamlit run app.py
 ```
+Open `http://localhost:8501` to view the Project Overview, test the interactive Live Demo Simulation, and explore benchmark results.
 
-### 6. Verify Environment Setup
-Run the automated pre-flight setup check:
+### 4. CLI Workflow
 ```bash
-python scripts/check_setup.py
+# Profile baseline FAST vs ROBUST modes
+python run.py --profile
+
+# Extract frame condition features
+python run.py --extract-features
+
+# Build training labels
+python run.py --build-labels
+
+# Train Random Forest mode selector
+python run.py --train-selector
+
+# Run comparative evaluation across all 3 modes
+python run.py --evaluate
 ```
-
----
-
-## Running the Streamlit Application
-
-Launch the interactive Streamlit dashboard:
-```bash
-streamlit run app/streamlit_app.py
-```
-Open your browser at `http://localhost:8501` to access the landing page, live interactive mode simulation demo, and benchmark evaluation results.
-
----
-
-## Development Roadmap & Checklist
-
-- [ ] **Baseline Pipeline**: Implement YOLODetector (`src/detection/detector.py`) and ByteTrack association (`src/tracking/tracker.py`)
-- [ ] **Profiling**: Benchmark Always FAST and Always ROBUST baseline configurations across target videos (`scripts/profile_modes.py`)
-- [ ] **Feature Extraction**: Implement modular image quality, motion, and bbox scale extractors (`src/features/`)
-- [ ] **Selector**: Build label generator (`src/selector/labeler.py`) and train Random Forest mode classifier (`src/selector/train.py`)
-- [ ] **Adaptive Pipeline**: Wire condition extractor, selector, hysteresis smoother, and dynamic perception switches (`src/pipeline/adaptive_pipeline.py`)
-- [ ] **Evaluation**: Benchmark Always FAST vs Always ROBUST vs Adaptive using TrackEval (`scripts/run_experiments.py`)
-- [ ] **Demo UI**: Connect real video feeds, live telemetry charts, and model inference into Streamlit (`app/`)
-
