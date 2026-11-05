@@ -72,12 +72,17 @@ class ByteTrackerWrapper:
 
             cx = int((x1 + x2) / 2.0)
             cy = int((y1 + y2) / 2.0)
+            w = round(max(0.0, x2 - x1), 1)
+            h = round(max(0.0, y2 - y1), 1)
             self.track_history[track_id].append((cx, cy))
 
             active_tracks.append(
                 {
                     "id": track_id,
                     "box": (x1, y1, x2, y2),
+                    "center": (cx, cy),
+                    "width": w,
+                    "height": h,
                     "conf": conf,
                     "cls": cls_id,
                     "trail": list(self.track_history[track_id]),

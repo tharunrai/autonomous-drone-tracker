@@ -3,6 +3,7 @@ paths:
   uploads_dir: "data/uploads"
   outputs_dir: "outputs"
   metrics_dir: "outputs/metrics"
+  tracks_dir: "outputs/tracks"
   videos_dir: "outputs/videos"
   plots_dir: "outputs/plots"
 

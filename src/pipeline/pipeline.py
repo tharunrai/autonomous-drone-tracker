@@ -180,6 +180,7 @@ class TrackingPipeline:
         self.smoother.reset(initial_mode="FAST")
 
         frame_records: List[Dict[str, Any]] = []
+        track_records: List[Dict[str, Any]] = []
         detector_calls = 0
         mode_switches = 0
         prev_active_mode = "FAST"
@@ -230,6 +231,30 @@ class TrackingPipeline:
             frame_dt = time.perf_counter() - frame_t0
             instant_fps = 1.0 / (frame_dt + 1e-6)
 
+            # Record per-object positional data
+            for t in tracks:
+                cx, cy = t.get("center", (int((t["box"][0] + t["box"][2]) / 2), int((t["box"][1] + t["box"][3]) / 2)))
+                x1, y1, x2, y2 = t["box"]
+                track_records.append(
+                    {
+                        "frame": frame_idx,
+                        "track_id": t["id"],
+                        "center_x": cx,
+                        "center_y": cy,
+                        "norm_center_x": round(cx / max(1, width), 4),
+                        "norm_center_y": round(cy / max(1, height), 4),
+                        "bbox_x1": round(x1, 1),
+                        "bbox_y1": round(y1, 1),
+                        "bbox_x2": round(x2, 1),
+                        "bbox_y2": round(y2, 1),
+                        "bbox_width": t.get("width", round(max(0.0, x2 - x1), 1)),
+                        "bbox_height": t.get("height", round(max(0.0, y2 - y1), 1)),
+                        "confidence": round(t["conf"], 3),
+                        "class_id": t.get("cls", 0),
+                        "mode": current_mode_name,
+                    }
+                )
+
             # 4. Render visual overlays
             annotated_frame = self._render_frame(
                 frame.copy(),
@@ -266,6 +291,13 @@ class TrackingPipeline:
         metrics_file = metrics_dir / f"{input_file.stem}_{self.mode.value.lower()}_metrics.csv"
         metrics_df.to_csv(metrics_file, index=False)
 
+        # Save positional tracks CSV
+        tracks_df = pd.DataFrame(track_records)
+        tracks_dir = Path(self.config.get("paths", {}).get("tracks_dir", "outputs/tracks"))
+        tracks_dir.mkdir(parents=True, exist_ok=True)
+        tracks_file = tracks_dir / f"{input_file.stem}_{self.mode.value.lower()}_tracks.csv"
+        tracks_df.to_csv(tracks_file, index=False)
+
         summary = {
             "total_frames": processed_count,
             "total_time_seconds": round(total_time, 2),
@@ -275,7 +307,10 @@ class TrackingPipeline:
             "mode_switches": mode_switches,
             "output_video": str(final_video_path),
             "metrics_csv": str(metrics_file),
+            "tracks_csv": str(tracks_file),
             "records_df": metrics_df,
+            "tracks_df": tracks_df,
+            "total_unique_targets": int(tracks_df["track_id"].nunique()) if not tracks_df.empty else 0,
         }
         return summary
 
@@ -287,16 +322,17 @@ class TrackingPipeline:
         fps: float,
         frame_idx: int,
     ) -> np.ndarray:
-        """Render target bounding boxes, ID banners, motion trails, and HUD telemetry overlay."""
+        """Render target bounding boxes, ID & position banners, motion trails, and HUD telemetry overlay."""
         # Color palette: Emerald for FAST, Amber/Crimson for ROBUST
         mode_color = (0, 200, 50) if mode_name == "FAST" else (30, 80, 240)
 
-        # Draw motion trails and bounding boxes
+        # Draw motion trails, center reticles, and bounding boxes with position labels
         for track in tracks:
             track_id = track["id"]
             box = track["box"]
             conf = track["conf"]
             trail = track.get("trail", [])
+            cx, cy = track.get("center", (int((box[0] + box[2]) / 2), int((box[1] + box[3]) / 2)))
 
             # Draw motion trail
             if len(trail) > 1:
@@ -307,34 +343,58 @@ class TrackingPipeline:
             x1, y1, x2, y2 = [int(v) for v in box]
             cv2.rectangle(frame, (x1, y1), (x2, y2), mode_color, 2)
 
-            # Draw label banner
-            label = f"ID #{track_id} ({conf:.2f})"
-            (lw, lh), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(frame, (x1, max(0, y1 - lh - 6)), (x1 + lw + 4, y1), mode_color, -1)
+            # Draw center crosshair reticle
+            cv2.circle(frame, (cx, cy), 3, (0, 255, 255), -1)
+            cv2.drawMarker(frame, (cx, cy), (0, 255, 255), cv2.MARKER_CROSS, 10, 1)
+
+            # Draw target ID, confidence, and position label banner: "ID #1 (0.85) | (cx, cy)"
+            label = f"ID #{track_id} ({conf:.2f}) | Pos: ({cx}, {cy})"
+            (lw, lh), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+            cv2.rectangle(frame, (x1, max(0, y1 - lh - 6)), (x1 + lw + 6, y1), mode_color, -1)
             cv2.putText(
                 frame,
                 label,
-                (x1 + 2, y1 - 4),
+                (x1 + 3, y1 - 4),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                0.45,
                 (255, 255, 255),
                 1,
                 cv2.LINE_AA,
             )
 
-        # Draw top HUD banner
-        hud_text = f"Frame: {frame_idx:04d} | Mode: {mode_name} | FPS: {fps:.1f} | Active Tracks: {len(tracks)}"
-        (hw, hh), _ = cv2.getTextSize(hud_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-        cv2.rectangle(frame, (10, 10), (20 + hw, 20 + hh + 10), (20, 20, 20), -1)
-        cv2.rectangle(frame, (10, 10), (20 + hw, 20 + hh + 10), mode_color, 2)
+        # Draw top HUD banner with pipeline status and active target positions
+        hud_line1 = f"Frame: {frame_idx:04d} | Mode: {mode_name} | FPS: {fps:.1f} | Active Targets: {len(tracks)}"
+        if tracks:
+            pos_strs = [f"ID#{t['id']}: ({t.get('center', (0,0))[0]},{t.get('center', (0,0))[1]})" for t in tracks[:3]]
+            hud_line2 = f"Target Position(s): {' | '.join(pos_strs)}"
+        else:
+            hud_line2 = "Target Position(s): None Detected"
+
+        (hw1, hh1), _ = cv2.getTextSize(hud_line1, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+        (hw2, hh2), _ = cv2.getTextSize(hud_line2, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+        hud_w = max(hw1, hw2) + 20
+        hud_h = hh1 + hh2 + 25
+
+        cv2.rectangle(frame, (10, 10), (10 + hud_w, 10 + hud_h), (20, 20, 20), -1)
+        cv2.rectangle(frame, (10, 10), (10 + hud_w, 10 + hud_h), mode_color, 2)
         cv2.putText(
             frame,
-            hud_text,
-            (15, 18 + hh),
+            hud_line1,
+            (15, 15 + hh1),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            0.55,
             (255, 255, 255),
             2,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            frame,
+            hud_line2,
+            (15, 22 + hh1 + hh2),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (0, 255, 255),
+            1,
             cv2.LINE_AA,
         )
         return frame

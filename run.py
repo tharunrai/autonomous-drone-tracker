@@ -126,9 +126,18 @@ def main() -> None:
     print(f"  Average FPS:         {summary['avg_fps']}")
     print(f"  Detector Calls:      {summary['detector_calls']} ({summary['detector_call_ratio'] * 100:.1f}%)")
     print(f"  Mode Switches:       {summary['mode_switches']}")
+    print(f"  Unique Targets:      {summary.get('total_unique_targets', 0)}")
     print(f"  Annotated Video:     {summary['output_video']}")
     print(f"  Metrics CSV:         {summary['metrics_csv']}")
+    print(f"  Positions CSV:       {summary['tracks_csv']}")
     print("=" * 50)
+
+    tracks_df = summary.get("tracks_df")
+    if tracks_df is not None and not tracks_df.empty:
+        print("\n[SAMPLE OBJECT POSITIONS]")
+        sample = tracks_df[["frame", "track_id", "center_x", "center_y", "bbox_width", "bbox_height", "confidence"]].head(10)
+        print(sample.to_string(index=False))
+        print("...")
 
 
 if __name__ == "__main__":

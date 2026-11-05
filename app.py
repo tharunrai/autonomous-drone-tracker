@@ -142,16 +142,120 @@ if "last_summary" in st.session_state:
         if Path(annotated_path).is_file():
             st.video(annotated_path)
 
-    # Download Button
-    if Path(summary["output_video"]).is_file():
-        with open(summary["output_video"], "rb") as video_bytes:
-            st.download_button(
-                label="⬇️ Download Annotated Video (H.264 MP4)",
-                data=video_bytes,
-                file_name=Path(summary["output_video"]).name,
-                mime="video/mp4",
-                use_container_width=True,
+    # Download Buttons
+    col_dl1, col_dl2 = st.columns(2)
+    with col_dl1:
+        if Path(summary["output_video"]).is_file():
+            with open(summary["output_video"], "rb") as video_bytes:
+                st.download_button(
+                    label="⬇️ Download Annotated Video (H.264 MP4)",
+                    data=video_bytes,
+                    file_name=Path(summary["output_video"]).name,
+                    mime="video/mp4",
+                    use_container_width=True,
+                )
+    with col_dl2:
+        if "tracks_csv" in summary and Path(summary["tracks_csv"]).is_file():
+            with open(summary["tracks_csv"], "rb") as tracks_bytes:
+                st.download_button(
+                    label="⬇️ Download Object Positions & Trajectories (CSV)",
+                    data=tracks_bytes,
+                    file_name=Path(summary["tracks_csv"]).name,
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+
+    # ---------------------------------------------------------
+    # Object Position & Trajectory Section
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.header("📍 Detected Object Positions & Flight Trajectories")
+
+    tracks_df: pd.DataFrame = summary.get("tracks_df", pd.DataFrame())
+
+    if not tracks_df.empty:
+        unique_ids = sorted(tracks_df["track_id"].unique())
+        st.markdown(
+            f"**Total Tracked Objects:** `{len(unique_ids)}` unique target(s) identified across `{len(tracks_df)}` detection instances."
+        )
+
+        # Show latest known positions of all targets
+        latest_positions = []
+        for tid in unique_ids:
+            sub = tracks_df[tracks_df["track_id"] == tid].iloc[-1]
+            latest_positions.append(
+                {
+                    "Target ID": f"Target #{int(tid)}",
+                    "Latest Frame": int(sub["frame"]),
+                    "Center X (px)": int(sub["center_x"]),
+                    "Center Y (px)": int(sub["center_y"]),
+                    "Normalized (X, Y)": f"({sub['norm_center_x']:.3f}, {sub['norm_center_y']:.3f})",
+                    "Dimensions (WxH)": f"{sub['bbox_width']} x {sub['bbox_height']} px",
+                    "Bounding Box [x1, y1, x2, y2]": f"[{sub['bbox_x1']}, {sub['bbox_y1']}, {sub['bbox_x2']}, {sub['bbox_y2']}]",
+                    "Confidence": f"{sub['confidence']:.2f}",
+                }
             )
+        st.subheader("Latest Observed Target Positions")
+        st.dataframe(pd.DataFrame(latest_positions), use_container_width=True)
+
+        # 2D Trajectory Map (XY Coordinate Flight Path)
+        col_traj, col_details = st.columns([1.2, 1])
+
+        with col_traj:
+            st.subheader("2D Trajectory Map (Frame Coordinate Space)")
+            fig_traj, ax_traj = plt.subplots(figsize=(6, 4.5))
+
+            colors = plt.cm.tab10.colors
+            for idx, tid in enumerate(unique_ids):
+                sub = tracks_df[tracks_df["track_id"] == tid].sort_values("frame")
+                c = colors[idx % len(colors)]
+                ax_traj.plot(
+                    sub["center_x"],
+                    sub["center_y"],
+                    marker="o",
+                    markersize=3,
+                    linewidth=1.8,
+                    label=f"Target #{tid}",
+                    color=c,
+                )
+                # Mark start and end points
+                ax_traj.scatter(sub["center_x"].iloc[0], sub["center_y"].iloc[0], color=c, marker="^", s=60, edgecolors="black")
+                ax_traj.scatter(sub["center_x"].iloc[-1], sub["center_y"].iloc[-1], color=c, marker="s", s=60, edgecolors="black")
+
+            ax_traj.set_xlabel("X Pixel Position")
+            ax_traj.set_ylabel("Y Pixel Position")
+            ax_traj.invert_yaxis()  # Match image/video top-left origin
+            ax_traj.grid(True, linestyle="--", alpha=0.5)
+            ax_traj.legend(loc="upper right")
+            plt.tight_layout()
+            st.pyplot(fig_traj)
+            plt.close(fig_traj)
+
+        with col_details:
+            st.subheader("Filter Trajectory by Target")
+            target_filter = st.selectbox(
+                "Select Target ID to inspect:",
+                options=["All Targets"] + [f"Target #{tid}" for tid in unique_ids],
+            )
+            if target_filter == "All Targets":
+                filtered_tracks = tracks_df
+            else:
+                sel_id = int(target_filter.replace("Target #", ""))
+                filtered_tracks = tracks_df[tracks_df["track_id"] == sel_id]
+
+            st.dataframe(
+                filtered_tracks[
+                    ["frame", "track_id", "center_x", "center_y", "bbox_width", "bbox_height", "confidence", "mode"]
+                ],
+                use_container_width=True,
+                height=320,
+            )
+
+        with st.expander("📄 View Full Positional Tracking Table (All Columns)"):
+            st.dataframe(tracks_df, use_container_width=True)
+
+    else:
+        st.info("ℹ️ No target objects were detected or tracked in this video sequence.")
 
     # Telemetry Line Chart for ADAPTIVE mode
     if not records_df.empty:
