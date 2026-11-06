@@ -1,306 +1,255 @@
-"""Streamlit interactive UI for Condition-Aware Adaptive Perception for Air-to-Air UAV Tracking."""
+"""Streamlit UI for Condition-Aware Adaptive Perception for Air-to-Air UAV Tracking.
+
+Layout:  sidebar = settings  ->  main page = intro, run status, then results in 3 tabs.
+Each part of the page lives in its own small function so it is easy to find and edit.
+"""
 
 from pathlib import Path
-import matplotlib.pyplot as plt
+
+import altair as alt
 import pandas as pd
 import streamlit as st
 
 from src.pipeline.pipeline import Mode, TrackingPipeline
 
-st.set_page_config(
-    page_title="Condition-Aware Adaptive UAV Tracking",
-    page_icon="✈️",
-    layout="wide",
-    initial_sidebar_state="expanded",
+UPLOAD_DIR = Path("data/uploads")
+
+MODE_HELP = {
+    "ADAPTIVE": "Switches between FAST and ROBUST on its own, based on how hard each moment looks.",
+    "FAST": "Small model, low resolution, skips frames. Quickest, least careful.",
+    "ROBUST": "Big model, high resolution, every frame. Slowest, most careful.",
+}
+
+st.set_page_config(page_title="UAV Tracker", page_icon=":material/flight:", layout="wide")
+
+# A few small touches the theme file can't do (tighter sidebar title, stat card look).
+st.html(
+    """
+    <style>
+      [data-testid="stMetric"] {
+          background: #efeadf; border: 1px solid #d9d2c3;
+          border-radius: 6px; padding: 14px 18px;
+      }
+      [data-testid="stMetricLabel"] { opacity: .75; }
+      .eyebrow { letter-spacing: .14em; text-transform: uppercase;
+                 font-size: .75rem; color: #c2410c; font-weight: 700; margin: 0; }
+    </style>
+    """
 )
 
-st.title("✈️ Condition-Aware Adaptive Perception for Air-to-Air UAV Tracking")
-st.markdown(
-    "Dynamically adjust perception workload between **FAST** (lightweight, high FPS) "
-    "and **ROBUST** (dense detection, high resolution) based on real-time environmental conditions."
-)
 
-# ---------------------------------------------------------
-# Sidebar Configuration
-# ---------------------------------------------------------
-st.sidebar.header("🕹️ Configuration")
+# ----------------------------------------------------------------------------
+# Sidebar: all the settings in one place
+# ----------------------------------------------------------------------------
+def sidebar_settings():
+    """Draw the sidebar and return what the user picked."""
+    with st.sidebar:
+        st.markdown("### :material/flight: UAV Tracker")
+        st.caption("Condition-aware perception for air-to-air tracking")
+        st.divider()
 
-uploaded_file = st.sidebar.file_uploader(
-    "Upload Video File",
-    type=["mp4", "avi", "mov", "mkv"],
-    help="Select a video file to run tracking on.",
-)
+        video = st.file_uploader("1. Flight video", type=["mp4", "avi", "mov", "mkv"])
 
-selected_mode_str = st.sidebar.selectbox(
-    "Operational Mode",
-    options=["ADAPTIVE", "FAST", "ROBUST"],
-    index=0,
-    help="ADAPTIVE toggles between FAST and ROBUST per frame based on scene difficulty.",
-)
+        mode = st.segmented_control(
+            "2. Mode", options=list(MODE_HELP), default="ADAPTIVE", selection_mode="single"
+        ) or "ADAPTIVE"
+        st.caption(MODE_HELP[mode])
 
-conf_threshold = st.sidebar.slider(
-    "Detector Confidence Threshold",
-    min_value=0.05,
-    max_value=0.90,
-    value=0.25,
-    step=0.05,
-    help="Minimum confidence score required for YOLO detection.",
-)
+        with st.expander("Fine tuning"):
+            conf = st.slider("Detection confidence", 0.05, 0.90, 0.25, 0.05,
+                             help="Detections below this score are ignored.")
+            limit = st.number_input("Only process first N frames", 0, 20000, 0, 50,
+                                    help="0 means the whole video. Handy for quick tests.")
 
-max_frames_input = st.sidebar.number_input(
-    "Max Frames Limit (0 for full video)",
-    min_value=0,
-    max_value=20000,
-    value=0,
-    step=50,
-    help="Process only the first N frames for rapid benchmarking.",
-)
-max_frames = int(max_frames_input) if max_frames_input > 0 else None
+        run = st.button("Run tracking", type="primary", width="stretch",
+                        icon=":material/play_arrow:", disabled=video is None)
+        if video is None:
+            st.caption("Upload a video to enable the button.")
+    return video, mode, conf, (int(limit) or None), run
 
-run_btn = st.sidebar.button("🚀 Run Tracking", type="primary", use_container_width=True)
 
-# ---------------------------------------------------------
-# Video Processing Execution
-# ---------------------------------------------------------
-if uploaded_file is not None:
-    uploads_dir = Path("data/uploads")
-    uploads_dir.mkdir(parents=True, exist_ok=True)
-    saved_video_path = uploads_dir / uploaded_file.name
+# ----------------------------------------------------------------------------
+# Running the pipeline
+# ----------------------------------------------------------------------------
+def save_upload(video) -> Path:
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    path = UPLOAD_DIR / video.name
+    path.write_bytes(video.getbuffer())
+    return path
 
-    # Save uploaded file to disk
-    with open(saved_video_path, "wb") as f:
-        f.write(uploaded_file.getbuffer())
 
-    st.sidebar.success(f"Uploaded: {uploaded_file.name} ({saved_video_path.stat().st_size / (1024*1024):.1f} MB)")
+def run_pipeline(video_path: Path, mode: str, conf: float, max_frames):
+    """Run tracking with a live progress bar, then store results in session_state."""
+    bar = st.progress(0.0, text="Starting...")
 
-    if run_btn:
-        progress_bar = st.progress(0.0)
-        status_box = st.empty()
+    def on_progress(current, total, fps):
+        bar.progress(min(1.0, current / max(1, total)),
+                     text=f"Frame {current} of {total}  ·  {fps:.0f} fps")
 
-        def on_progress(current: int, total: int, instant_fps: float) -> None:
-            pct = min(1.0, current / max(1, total))
-            progress_bar.progress(pct)
-            status_box.markdown(f"**Processing frame {current} / {total}** — Current Speed: `{instant_fps:.1f} FPS`")
+    try:
+        pipeline = TrackingPipeline(mode=Mode(mode), custom_conf=conf)
+        summary = pipeline.run_video(input_path=video_path, max_frames=max_frames,
+                                     progress_callback=on_progress)
+    except Exception as err:  # show a readable message instead of a stack trace
+        bar.empty()
+        st.error(f"Tracking failed: {err}")
+        st.stop()
 
-        try:
-            pipeline = TrackingPipeline(
-                mode=Mode(selected_mode_str),
-                custom_conf=conf_threshold,
-            )
-            with st.spinner("Executing perception pipeline and re-encoding video..."):
-                summary = pipeline.run_video(
-                    input_path=saved_video_path,
-                    max_frames=max_frames,
-                    progress_callback=on_progress,
-                )
-            progress_bar.progress(1.0)
-            status_box.success("✅ Tracking and video generation completed successfully!")
-            st.session_state["last_summary"] = summary
-            st.session_state["last_input_video"] = str(saved_video_path)
-            st.session_state["last_mode"] = selected_mode_str
-        except Exception as e:
-            st.error(f"Error during video processing: {e}")
-            raise e
+    bar.empty()
+    st.session_state["result"] = {"summary": summary, "input": str(video_path), "mode": mode}
 
-# ---------------------------------------------------------
-# Display Results Area
-# ---------------------------------------------------------
-if "last_summary" in st.session_state:
-    summary = st.session_state["last_summary"]
-    input_video = st.session_state["last_input_video"]
-    active_mode = st.session_state["last_mode"]
-    records_df: pd.DataFrame = summary["records_df"]
 
-    st.markdown("---")
-    st.header("📊 Tracking Output & Real-Time Telemetry")
+# ----------------------------------------------------------------------------
+# Results: three tabs
+# ----------------------------------------------------------------------------
+def stat_row(summary, frames_df):
+    peak = int(frames_df["num_tracks"].max()) if not frames_df.empty else 0
+    cols = st.columns(4)
+    cols[0].metric("Speed", f"{summary['avg_fps']} fps")
+    cols[1].metric("Detector used on", f"{summary['detector_call_ratio'] * 100:.0f}% of frames",
+                   help=f"{summary['detector_calls']} detector calls in total")
+    cols[2].metric("Mode switches", summary["mode_switches"])
+    cols[3].metric("Most targets at once", peak)
 
-    # Metric Cards
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric(label="Average Throughput", value=f"{summary['avg_fps']} FPS")
-    with col2:
-        call_pct = summary["detector_call_ratio"] * 100
-        st.metric(label="Detector Invocations", value=f"{summary['detector_calls']} ({call_pct:.1f}%)")
-    with col3:
-        st.metric(label="Mode Switches", value=summary["mode_switches"])
-    with col4:
-        max_tracks = int(records_df["num_tracks"].max()) if not records_df.empty else 0
-        st.metric(label="Peak Tracked Objects", value=max_tracks)
 
-    # Side-by-side Video Playback
-    st.markdown("### 🎥 Side-by-Side Video Comparison")
-    col_left, col_right = st.columns(2)
-
-    with col_left:
-        st.subheader("Original Input Video")
-        if Path(input_video).is_file():
-            st.video(input_video)
-
-    with col_right:
-        st.subheader(f"Annotated Playback ({active_mode} Mode)")
-        annotated_path = summary["output_video"]
-        if Path(annotated_path).is_file():
-            st.video(annotated_path)
-
-    # Download Buttons
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
+def tab_video(result):
+    summary = result["summary"]
+    left, right = st.columns(2)
+    with left:
+        st.caption("Original")
+        if Path(result["input"]).is_file():
+            st.video(result["input"])
+    with right:
+        st.caption(f"Tracked · {result['mode'].title()} mode")
         if Path(summary["output_video"]).is_file():
-            with open(summary["output_video"], "rb") as video_bytes:
-                st.download_button(
-                    label="⬇️ Download Annotated Video (H.264 MP4)",
-                    data=video_bytes,
-                    file_name=Path(summary["output_video"]).name,
-                    mime="video/mp4",
-                    use_container_width=True,
-                )
-    with col_dl2:
-        if "tracks_csv" in summary and Path(summary["tracks_csv"]).is_file():
-            with open(summary["tracks_csv"], "rb") as tracks_bytes:
-                st.download_button(
-                    label="⬇️ Download Object Positions & Trajectories (CSV)",
-                    data=tracks_bytes,
-                    file_name=Path(summary["tracks_csv"]).name,
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+            st.video(summary["output_video"])
 
-    # ---------------------------------------------------------
-    # Object Position & Trajectory Section
-    # ---------------------------------------------------------
-    st.markdown("---")
-    st.header("📍 Detected Object Positions & Flight Trajectories")
+    d1, d2, _ = st.columns([1, 1, 1])
+    for col, key, label, mime in [
+        (d1, "output_video", "Download video", "video/mp4"),
+        (d2, "tracks_csv", "Download positions (CSV)", "text/csv"),
+    ]:
+        path = Path(summary.get(key, ""))
+        if path.is_file():
+            col.download_button(label, path.read_bytes(), file_name=path.name, mime=mime,
+                                width="stretch", icon=":material/download:")
 
-    tracks_df: pd.DataFrame = summary.get("tracks_df", pd.DataFrame())
 
-    if not tracks_df.empty:
-        unique_ids = sorted(tracks_df["track_id"].unique())
-        st.markdown(
-            f"**Total Tracked Objects:** `{len(unique_ids)}` unique target(s) identified across `{len(tracks_df)}` detection instances."
+def tab_targets(tracks_df):
+    if tracks_df.empty:
+        st.info("No objects were tracked in this video. Try lowering the confidence in the sidebar.")
+        return
+
+    ids = sorted(tracks_df["track_id"].unique())
+    st.write(f"**{len(ids)}** target(s) followed across **{len(tracks_df)}** observations.")
+
+    choice = st.pills("Show targets", [f"#{i}" for i in ids], selection_mode="multi",
+                      default=[f"#{i}" for i in ids][:6])
+    shown = tracks_df[tracks_df["track_id"].isin([int(c[1:]) for c in choice])].copy()
+    shown["target"] = "#" + shown["track_id"].astype(str)
+
+    # Flight path in image coordinates (y is flipped so it matches the video).
+    path = (
+        alt.Chart(shown)
+        .mark_line(point=alt.OverlayMarkDef(size=18))
+        .encode(
+            x=alt.X("center_x:Q", title="x (px)"),
+            y=alt.Y("center_y:Q", title="y (px)", scale=alt.Scale(reverse=True)),
+            color=alt.Color("target:N", title="Target"),
+            order="frame:Q",
+            tooltip=["target", "frame", "center_x", "center_y", "confidence"],
         )
+        .properties(height=380)
+        .interactive()
+    )
+    st.altair_chart(path, alt="Flight paths of tracked targets in image coordinates")
 
-        # Show latest known positions of all targets
-        latest_positions = []
-        for tid in unique_ids:
-            sub = tracks_df[tracks_df["track_id"] == tid].iloc[-1]
-            latest_positions.append(
-                {
-                    "Target ID": f"Target #{int(tid)}",
-                    "Latest Frame": int(sub["frame"]),
-                    "Center X (px)": int(sub["center_x"]),
-                    "Center Y (px)": int(sub["center_y"]),
-                    "Normalized (X, Y)": f"({sub['norm_center_x']:.3f}, {sub['norm_center_y']:.3f})",
-                    "Dimensions (WxH)": f"{sub['bbox_width']} x {sub['bbox_height']} px",
-                    "Bounding Box [x1, y1, x2, y2]": f"[{sub['bbox_x1']}, {sub['bbox_y1']}, {sub['bbox_x2']}, {sub['bbox_y2']}]",
-                    "Confidence": f"{sub['confidence']:.2f}",
-                }
-            )
-        st.subheader("Latest Observed Target Positions")
-        st.dataframe(pd.DataFrame(latest_positions), use_container_width=True)
+    st.markdown("**Last known position of each target**")
+    last = tracks_df.sort_values("frame").groupby("track_id").tail(1)
+    st.dataframe(
+        last[["track_id", "frame", "center_x", "center_y", "bbox_width", "bbox_height", "confidence"]]
+        .rename(columns={"track_id": "target"}),
+        hide_index=True, alt="Last known position of each target",
+    )
+    with st.expander("Every observation"):
+        st.dataframe(shown.drop(columns="target"), hide_index=True, alt="All tracked observations")
 
-        # 2D Trajectory Map (XY Coordinate Flight Path)
-        col_traj, col_details = st.columns([1.2, 1])
 
-        with col_traj:
-            st.subheader("2D Trajectory Map (Frame Coordinate Space)")
-            fig_traj, ax_traj = plt.subplots(figsize=(6, 4.5))
+def tab_conditions(frames_df):
+    if frames_df.empty:
+        st.info("No per-frame data available.")
+        return
 
-            colors = plt.cm.tab10.colors
-            for idx, tid in enumerate(unique_ids):
-                sub = tracks_df[tracks_df["track_id"] == tid].sort_values("frame")
-                c = colors[idx % len(colors)]
-                ax_traj.plot(
-                    sub["center_x"],
-                    sub["center_y"],
-                    marker="o",
-                    markersize=3,
-                    linewidth=1.8,
-                    label=f"Target #{tid}",
-                    color=c,
-                )
-                # Mark start and end points
-                ax_traj.scatter(sub["center_x"].iloc[0], sub["center_y"].iloc[0], color=c, marker="^", s=60, edgecolors="black")
-                ax_traj.scatter(sub["center_x"].iloc[-1], sub["center_y"].iloc[-1], color=c, marker="s", s=60, edgecolors="black")
-
-            ax_traj.set_xlabel("X Pixel Position")
-            ax_traj.set_ylabel("Y Pixel Position")
-            ax_traj.invert_yaxis()  # Match image/video top-left origin
-            ax_traj.grid(True, linestyle="--", alpha=0.5)
-            ax_traj.legend(loc="upper right")
-            plt.tight_layout()
-            st.pyplot(fig_traj)
-            plt.close(fig_traj)
-
-        with col_details:
-            st.subheader("Filter Trajectory by Target")
-            target_filter = st.selectbox(
-                "Select Target ID to inspect:",
-                options=["All Targets"] + [f"Target #{tid}" for tid in unique_ids],
-            )
-            if target_filter == "All Targets":
-                filtered_tracks = tracks_df
-            else:
-                sel_id = int(target_filter.replace("Target #", ""))
-                filtered_tracks = tracks_df[tracks_df["track_id"] == sel_id]
-
-            st.dataframe(
-                filtered_tracks[
-                    ["frame", "track_id", "center_x", "center_y", "bbox_width", "bbox_height", "confidence", "mode"]
-                ],
-                use_container_width=True,
-                height=320,
-            )
-
-        with st.expander("📄 View Full Positional Tracking Table (All Columns)"):
-            st.dataframe(tracks_df, use_container_width=True)
-
-    else:
-        st.info("ℹ️ No target objects were detected or tracked in this video sequence.")
-
-    # Telemetry Line Chart for ADAPTIVE mode
-    if not records_df.empty:
-        st.markdown("### 📈 Environmental Conditions & Mode Switching Over Time")
-
-        fig, (ax_mode, ax_features) = plt.subplots(
-            2, 1, figsize=(10, 5), sharex=True, gridspec_kw={"height_ratios": [1, 2]}
+    st.markdown("**Which mode was running**")
+    modes = frames_df.assign(run=lambda d: (d["mode"] != d["mode"].shift()).cumsum())
+    blocks = modes.groupby("run").agg(start=("frame", "min"), end=("frame", "max"), mode=("mode", "first"))
+    timeline = (
+        alt.Chart(blocks.reset_index())
+        .mark_bar(height=26)
+        .encode(
+            x=alt.X("start:Q", title="frame"), x2="end:Q",
+            color=alt.Color("mode:N", title=None,
+                            scale=alt.Scale(domain=["FAST", "ROBUST"], range=["#2f6f6a", "#c2410c"])),
+            tooltip=["mode", "start", "end"],
         )
+        .properties(height=60)
+    )
+    st.altair_chart(timeline, alt="Timeline showing which mode was active over the video")
 
-        frames = records_df["frame"]
+    st.markdown("**What the scene looked like** (each line scaled 0 to 1)")
+    names = {"blur": "Sharpness", "camera_motion": "Camera motion", "mean_confidence": "Detection confidence"}
+    cols = [c for c in names if c in frames_df]
+    if cols:
+        scaled = frames_df[cols] / frames_df[cols].max().clip(lower=1e-9)
+        scaled.index = frames_df["frame"]
+        st.line_chart(scaled.rename(columns=names), height=280)
+    with st.expander("Per-frame table"):
+        st.dataframe(frames_df, hide_index=True, alt="Per-frame telemetry")
 
-        # 1. Mode plot (Step chart)
-        mode_numeric = records_df["mode"].map({"FAST": 0, "ROBUST": 1})
-        ax_mode.step(frames, mode_numeric, where="mid", color="#00aa44", linewidth=2)
-        ax_mode.set_yticks([0, 1])
-        ax_mode.set_yticklabels(["FAST", "ROBUST"])
-        ax_mode.set_ylabel("Active Mode")
-        ax_mode.set_title("Operational Mode Timeline")
-        ax_mode.grid(True, linestyle="--", alpha=0.5)
 
-        # 2. Condition Features plot
-        if "blur" in records_df:
-            # Normalize blur for visual comparison
-            norm_blur = records_df["blur"] / max(1.0, records_df["blur"].max())
-            ax_features.plot(frames, norm_blur, label="Blur (Norm)", color="#3388ff", alpha=0.8)
+def show_results(result):
+    summary = result["summary"]
+    frames_df = summary["records_df"]
+    tracks_df = summary.get("tracks_df", pd.DataFrame())
 
-        if "camera_motion" in records_df:
-            norm_motion = records_df["camera_motion"] / max(1.0, records_df["camera_motion"].max())
-            ax_features.plot(frames, norm_motion, label="Camera Motion (Norm)", color="#ff8800", alpha=0.8)
+    st.success(f"Done: {summary['total_frames']} frames in {summary['total_time_seconds']} s.",
+               icon=":material/check_circle:")
+    stat_row(summary, frames_df)
 
-        if "mean_confidence" in records_df:
-            ax_features.plot(frames, records_df["mean_confidence"], label="Mean Confidence", color="#8833ff", alpha=0.8)
+    video_tab, targets_tab, cond_tab = st.tabs(
+        [":material/movie: Video", ":material/moving: Targets & paths", ":material/tune: Conditions"]
+    )
+    with video_tab:
+        tab_video(result)
+    with targets_tab:
+        tab_targets(tracks_df)
+    with cond_tab:
+        tab_conditions(frames_df)
 
-        ax_features.set_xlabel("Video Frame Index")
-        ax_features.set_ylabel("Normalized Feature Value")
-        ax_features.legend(loc="upper right")
-        ax_features.grid(True, linestyle="--", alpha=0.5)
 
-        plt.tight_layout()
-        st.pyplot(fig)
-        plt.close(fig)
+def show_empty_state():
+    with st.container(border=True):
+        st.markdown("#### How it works")
+        a, b, c = st.columns(3)
+        a.markdown("**1. Upload**  \nPick a drone flight video in the sidebar.")
+        b.markdown("**2. Choose a mode**  \nLet *Adaptive* decide, or force *Fast* / *Robust*.")
+        c.markdown("**3. Run**  \nWatch the tracked video, flight paths and mode timeline.")
+    st.caption("FAST is quick but coarse. ROBUST is careful but slow. "
+               "ADAPTIVE uses blur, camera motion, target size and confidence to pick between them.")
 
-        # Metrics Data Table
-        with st.expander("📄 View Frame-by-Frame Metrics Table"):
-            st.dataframe(records_df, use_container_width=True)
 
+# ----------------------------------------------------------------------------
+# Page
+# ----------------------------------------------------------------------------
+video, mode, conf, max_frames, run = sidebar_settings()
+
+st.html('<p class="eyebrow">Air-to-air tracking</p>')
+st.title("Spend compute only where the scene is hard")
+
+if video is not None and run:
+    run_pipeline(save_upload(video), mode, conf, max_frames)
+
+if "result" in st.session_state:
+    show_results(st.session_state["result"])
 else:
-    st.info("👈 Upload a video in the sidebar and click **'Run Tracking'** to begin.")
+    show_empty_state()
