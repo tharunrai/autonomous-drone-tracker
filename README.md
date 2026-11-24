@@ -34,7 +34,7 @@ This project introduces a **condition-aware adaptive perception pipeline**:
 │   ├── raw/
 │   ├── processed/
 │   └── splits/
-├── weights/                    # Model weights (yolov8n.pt, yolov8s.pt, selector_rf.joblib)
+├── weights/                    # yolov8n.pt, yolov8s.pt, selector_tree.joblib, selector_forest.joblib
 ├── outputs/                    # Annotated videos, tracks, metrics CSVs, and plots
 └── src/
     ├── __init__.py
@@ -53,7 +53,7 @@ This project introduces a **condition-aware adaptive perception pipeline**:
     │   └── features.py         # Blur, brightness, bbox area ratio, confidence, optical flow
     ├── selector/
     │   ├── __init__.py
-    │   └── selector.py         # RuleBasedSelector, MLSelector (placeholder), HysteresisSmoother
+    │   └── selector.py         # MLSelector (decision tree / random forest), RuleBasedSelector baseline, HysteresisSmoother
     ├── pipeline/
     │   ├── __init__.py
     │   └── pipeline.py         # Mode enum, ModeConfig, TrackingPipeline with visual HUD
@@ -62,7 +62,7 @@ This project introduces a **condition-aware adaptive perception pipeline**:
     │   └── metrics.py          # FPS, detector call ratio, summary stats, TrackEval placeholder
     └── training/
         ├── __init__.py
-        ├── train_selector.py   # PLACEHOLDER: build labels + train Random Forest selector
+        ├── train_selector.py   # Teacher labels (ROBUST vs FAST) + train decision tree & random forest selectors
         └── finetune_detector.py# PLACEHOLDER: fine-tune YOLO on custom drone tracking dataset
 ```
 
@@ -120,10 +120,15 @@ python run.py --video path/to/drone_flight.mp4 --mode FAST --max-frames 150
 
 1. **Swap Detector Weights**: Change model weights in `config.yaml` (`modes.fast.weights` or `modes.robust.weights`) to custom fine-tuned drone weights (e.g. YOLOv8 fine-tuned on drone datasets).
 2. **Add Custom Features**: Add spatial-temporal features (e.g. target velocity variance, contrast entropy) in `src/features/features.py`.
-3. **Train & Switch to MLSelector**:
-   - Implement labeling logic in `src/training/train_selector.py` to produce `data/processed/training_labels.csv`.
-   - Train and serialize a `RandomForestClassifier` into `weights/selector_rf.joblib`.
-   - Enable `selector.type: "ml"` in `config.yaml` to deploy `MLSelector`.
+3. **Train the learned selector** (decides FAST vs ROBUST in ADAPTIVE mode):
+   - Put flight videos in `data/raw/` or `data/uploads/`, then run `python -m src.training.train_selector`.
+   - Labels need no manual annotation: every clip is run always-FAST and always-ROBUST, and a frame is
+     labelled FAST when FAST finds at least 80% of ROBUST's confident targets over the next 15 frames.
+     Condition-varied copies (blur, shake, tiny targets, low light, noise) are generated for variety.
+   - A `DecisionTreeClassifier` and a `RandomForestClassifier` are trained, cross-validated by clip and
+     compared with the rule-based baseline; they are saved to `weights/selector_{tree,forest}.joblib`
+     and the report to `outputs/selector/report.json`.
+   - `selector.type` in `config.yaml` picks `forest`, `tree` or `rules`; the app also lets you pick per run.
 4. **Fine-tune YOLO Detector**: Implement training loop in `src/training/finetune_detector.py` using your labeled UAV dataset.
 5. **Benchmark with TrackEval**: Implement `run_trackeval()` in `src/evaluation/metrics.py` to evaluate HOTA/IDF1 against MOT-FLY ground truth.
 

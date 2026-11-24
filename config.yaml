@@ -26,8 +26,15 @@ features:
   downscale_flow_width: 320
 
 selector:
-  type: "rule_based"
-  ml_model_path: "weights/selector_rf.joblib"
+  # Who decides FAST vs ROBUST in ADAPTIVE mode: "forest" (random forest), "tree" (decision
+  # tree) or "rules" (hand-set thresholds below, the baseline). A learned selector that has
+  # not been trained yet falls back to rules. Train with: python -m src.training.train_selector
+  type: "forest"
+  models:
+    tree: "weights/selector_tree.joblib"
+    forest: "weights/selector_forest.joblib"
+  decide_every: 3                 # ask the learned model every N frames (features still update every frame)
+  threshold: 0.5                  # learned models: go ROBUST when P(ROBUST needed) >= this. Higher = less compute, fewer targets caught
   rule_thresholds:
     blur_threshold: 100.0         # Below this variance of Laplacian -> scene blurry -> push to ROBUST
     area_ratio_threshold: 0.003   # Below this bbox/image area ratio -> tiny object -> push to ROBUST

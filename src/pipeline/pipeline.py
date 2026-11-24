@@ -11,7 +11,7 @@ import pandas as pd
 
 from src.detection.detector import YOLODetector
 from src.features.features import ConditionFeatureExtractor
-from src.selector.selector import HysteresisSmoother, RuleBasedSelector
+from src.selector.selector import HysteresisSmoother, make_selector
 from src.tracking.tracker import ByteTrackerWrapper
 from src.utils.config import load_config
 from src.utils.video_io import VideoWriterWrapper, get_video_properties, read_video_frames
@@ -71,6 +71,8 @@ class TrackingPipeline:
         mode: Union[Mode, str] = Mode.ADAPTIVE,
         config_path: Union[str, Path] = "config.yaml",
         custom_conf: Optional[float] = None,
+        selector_type: Optional[str] = None,
+        selector_threshold: Optional[float] = None,
     ) -> None:
         """Initialize pipeline components according to target operational mode.
 
@@ -78,6 +80,10 @@ class TrackingPipeline:
             mode: Pipeline mode ('FAST', 'ROBUST', or 'ADAPTIVE').
             config_path: Path to YAML configuration file.
             custom_conf: Optional override for detector confidence threshold.
+            selector_type: Who decides the mode in ADAPTIVE: 'rules', 'tree' or 'forest'.
+                Defaults to ``selector.type`` in config.yaml.
+            selector_threshold: For tree/forest: switch to ROBUST when the model's probability
+                is at least this. Defaults to ``selector.threshold`` in config.yaml.
         """
         self.mode = Mode(mode) if isinstance(mode, str) else mode
         self.config = load_config(config_path)
@@ -123,8 +129,8 @@ class TrackingPipeline:
 
         # Initialize mode selector and smoother
         sel_cfg = self.config.get("selector", {})
-        self.selector = RuleBasedSelector(
-            thresholds=sel_cfg.get("rule_thresholds", {})
+        self.selector, self.selector_kind = make_selector(
+            selector_type or sel_cfg.get("type", "rules"), self.config, threshold=selector_threshold
         )
 
         hyst_cfg = self.config.get("hysteresis", {})
@@ -140,6 +146,8 @@ class TrackingPipeline:
         output_path: Optional[Union[str, Path]] = None,
         max_frames: Optional[int] = None,
         progress_callback: Optional[Callable[[int, int, float], None]] = None,
+        frame_callback: Optional[Callable[[np.ndarray, Dict[str, Any]], None]] = None,
+        save_outputs: bool = True,
     ) -> Dict[str, Any]:
         """Execute end-to-end tracking pipeline on a video file.
 
@@ -148,6 +156,11 @@ class TrackingPipeline:
             output_path: Destination path for annotated MP4 video.
             max_frames: Optional cap on frames to process.
             progress_callback: Optional callable(frame_idx, total_frames, fps).
+            frame_callback: Optional callable(annotated_bgr_frame, info) called after each
+                frame is drawn, for live previews. ``info`` holds frame, total_frames,
+                mode, fps, num_tracks, detector_invoked and tracks.
+            save_outputs: Write the annotated video and CSVs. Training turns this off and
+                only uses the returned DataFrames.
 
         Returns:
             Dictionary containing metrics summary and DataFrame of per-frame records.
@@ -172,11 +185,14 @@ class TrackingPipeline:
         else:
             output_video_path = Path(output_path).resolve()
 
-        writer = VideoWriterWrapper(output_video_path, fps=fps, width=width, height=height)
+        writer = (VideoWriterWrapper(output_video_path, fps=fps, width=width, height=height)
+                  if save_outputs else None)
+        draw = save_outputs or frame_callback is not None
 
         # Reset state
         self.tracker.reset()
         self.extractor.reset()
+        self.selector.reset()
         self.smoother.reset(initial_mode="FAST")
 
         frame_records: List[Dict[str, Any]] = []
@@ -256,14 +272,26 @@ class TrackingPipeline:
                 )
 
             # 4. Render visual overlays
-            annotated_frame = self._render_frame(
-                frame.copy(),
-                tracks=tracks,
-                mode_name=current_mode_name,
-                fps=instant_fps,
-                frame_idx=frame_idx,
-            )
-            writer.write_frame(annotated_frame)
+            if draw:
+                annotated_frame = self._render_frame(
+                    frame.copy(),
+                    tracks=tracks,
+                    mode_name=current_mode_name,
+                    fps=instant_fps,
+                    frame_idx=frame_idx,
+                )
+            if writer is not None:
+                writer.write_frame(annotated_frame)
+            if frame_callback:
+                frame_callback(annotated_frame, {
+                    "frame": frame_idx,
+                    "total_frames": total_frames,
+                    "mode": current_mode_name,
+                    "fps": instant_fps,
+                    "num_tracks": len(tracks),
+                    "detector_invoked": should_detect,
+                    "tracks": tracks,
+                })
 
             # 5. Log per-frame telemetry
             record = {
@@ -274,29 +302,36 @@ class TrackingPipeline:
                 "detector_invoked": should_detect,
                 **features,
             }
+            if self.mode == Mode.ADAPTIVE and hasattr(self.selector, "last_robust_prob"):
+                record["robust_prob"] = round(self.selector.last_robust_prob, 3)
             frame_records.append(record)
 
             if progress_callback:
                 progress_callback(frame_idx + 1, total_frames, instant_fps)
 
-        final_video_path = writer.release()
-        total_time = time.perf_counter() - total_start_time
+        total_time = time.perf_counter() - total_start_time  # processing only, not re-encoding
+        final_video_path = writer.release() if writer is not None else ""
         processed_count = len(frame_records)
         avg_fps = float(processed_count / (total_time + 1e-6))
 
-        # Save metrics CSV
         metrics_df = pd.DataFrame(frame_records)
-        metrics_dir = Path(self.config.get("paths", {}).get("metrics_dir", "outputs/metrics"))
-        metrics_dir.mkdir(parents=True, exist_ok=True)
-        metrics_file = metrics_dir / f"{input_file.stem}_{self.mode.value.lower()}_metrics.csv"
-        metrics_df.to_csv(metrics_file, index=False)
-
-        # Save positional tracks CSV
         tracks_df = pd.DataFrame(track_records)
-        tracks_dir = Path(self.config.get("paths", {}).get("tracks_dir", "outputs/tracks"))
-        tracks_dir.mkdir(parents=True, exist_ok=True)
-        tracks_file = tracks_dir / f"{input_file.stem}_{self.mode.value.lower()}_tracks.csv"
-        tracks_df.to_csv(tracks_file, index=False)
+        metrics_file = tracks_file = ""
+        if save_outputs:
+            # Files are named per mode, and per selector for ADAPTIVE, so runs don't overwrite each other.
+            tag = self.mode.value.lower()
+            if self.mode == Mode.ADAPTIVE and self.selector_kind != "rules":
+                tag += f"_{self.selector_kind}"
+            paths_cfg = self.config.get("paths", {})
+            metrics_dir = Path(paths_cfg.get("metrics_dir", "outputs/metrics"))
+            metrics_dir.mkdir(parents=True, exist_ok=True)
+            metrics_file = metrics_dir / f"{input_file.stem}_{tag}_metrics.csv"
+            metrics_df.to_csv(metrics_file, index=False)
+
+            tracks_dir = Path(paths_cfg.get("tracks_dir", "outputs/tracks"))
+            tracks_dir.mkdir(parents=True, exist_ok=True)
+            tracks_file = tracks_dir / f"{input_file.stem}_{tag}_tracks.csv"
+            tracks_df.to_csv(tracks_file, index=False)
 
         summary = {
             "total_frames": processed_count,
@@ -305,6 +340,7 @@ class TrackingPipeline:
             "detector_calls": detector_calls,
             "detector_call_ratio": round(detector_calls / max(1, processed_count), 3),
             "mode_switches": mode_switches,
+            "selector": self.selector_kind if self.mode == Mode.ADAPTIVE else None,
             "output_video": str(final_video_path),
             "metrics_csv": str(metrics_file),
             "tracks_csv": str(tracks_file),
