@@ -188,7 +188,7 @@ def setup_panel():
                 st.caption(SELECTOR_HELP[selector])
                 if selector in ("tree", "forest"):
                     threshold = st.slider(
-                        "Switch to Robust when the model is at least", 0.5, 0.95,
+                        "Switch to Robust when the model is at least", 0.1, 0.95,
                         float((app_config().get("selector") or {}).get("threshold", 0.5)), 0.05,
                         format="%.2f",
                         help="The model scores each moment with the chance that FAST would "

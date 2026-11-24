@@ -67,13 +67,62 @@ not ground truth.
 - **The random forest is the cheapest, but it trades quality for it on hard scenes.** It keeps full quality on both
   drone clips (100% and 99.7% agreement with 15% and 65% fewer detector calls than always-Robust), but on the
   crowded jet formation it saves 55% of detector calls and drops to 83% agreement. The decision tree is safer there
-  (99.7%) but spends nearly the full Robust budget. Raising `--threshold` makes the forest more cautious.
+  (99.7%) but spends nearly the full Robust budget. Lowering `--threshold` makes the forest more cautious (see [the threshold test](#choosing-the-forest-threshold)).
 - **Tracking identity is fragmented**: the formation has 4 jets but 19-22 track IDs are created, so IDs change when
   jets overlap. ID quality is not measured by these tables.
 
 **Caveats:** one run per setting, three short clips, and a detector with no drone class (see
 [Limitations](#limitations)). FPS differs little between modes on a fast GPU, so detector calls are the compute
 measure. Treat these as a first check, not a benchmark; ground-truth metrics (HOTA/IDF1) need labelled data.
+
+### Choosing the forest threshold
+
+The forest switches to ROBUST when its estimated chance that FAST would miss targets is at least the threshold
+(`--threshold`, default 0.5). **Lower = safer, higher = cheaper.** Tested with `--selector forest` on the
+four-jet formation, where the default was too aggressive:
+
+| Threshold | Det calls (Robust needs 549) | Robust % | Agreement |
+|---|---|---|---|
+| 0.8 | 193 | 2.7% | 80.1% |
+| 0.7 | 201 | 4.9% | 80.5% |
+| 0.5 (default) | 245 | 16.9% | 83.1% |
+| 0.4 | 400 | 59.2% | 95.8% |
+| 0.3 | 508 | 88.7% | 99.3% |
+| 0.2 | 540 | 97.4% | 100% |
+
+On both drone clips the default 0.5 already kept full quality, and a lower threshold only added compute
+(small drone: 184 calls at 0.1-0.3 vs 164 at 0.5). These values were tuned on the same test clips, so treat them as
+a guide, not a final setting.
+
+---
+
+## Conclusion
+
+**Which Adaptive selector is best? Adaptive + random forest, with a lower threshold for crowded scenes.**
+
+| | Adaptive + random forest | Adaptive + decision tree | Adaptive + rules |
+|---|---|---|---|
+| Compute (detector calls vs always-Robust) | **Lowest on all three clips**: 85%, 35% and 45% | 88%, 85% and 98% | 95%, 98% and 98% |
+| Quality kept (agreement with Robust) | 100%, 99.7%, **83%** at the default threshold | 100%, 100%, 99.7% | 100%, 100%, 100% |
+| Main weakness | Misses targets in crowded scenes unless the threshold is lowered (0.4 gives 95.8%, 0.3 gives 99.3%) | Saves little compute | Saves almost nothing: it sits in ROBUST 93-98% of the time |
+| Strength | Biggest savings with full quality on single-target clips | Safest learned option, and its rules can be printed and read | Needs no training |
+
+1. **Random forest is the best overall.** It is the cheapest on every clip and, on the two single-drone clips,
+   it matches always-Robust quality (99.7-100% agreement) with 15% and 65% fewer detector calls. It is the
+   recommended default for single-target tracking. For crowded multi-target scenes, lower the threshold to about 0.3-0.4.
+2. **Decision tree is the safe second choice.** It never dropped below 99.7% agreement, but it saved only 12-15%
+   of detector calls on two clips and 2% on the formation. Choose it when you need to explain the decision
+   (`outputs/selector/report.json` prints its rules) or cannot risk missing a target.
+3. **Hand-set rules are the weakest.** They keep full quality only because they almost never leave ROBUST, so they
+   barely save compute. Their value is as the baseline the learned models beat.
+4. **None of the three is better than always-Robust on quality; the point is cost.** If compute does not matter,
+   always-Robust is simply the most accurate. Always-Fast is cheapest but unreliable on small or crowded targets
+   (62-79% agreement on two of the three clips).
+
+**How far to trust this:** three short stock clips, one run per setting, a COCO detector with no drone class, a
+selector trained mostly on one indoor video, and agreement measured against Robust rather than labelled boxes. The
+ranking (forest cheapest, rules weakest) was consistent across all three clips, but a final claim needs a labelled UAV
+dataset, detector fine-tuning, a retrained selector and ground-truth metrics (HOTA/IDF1).
 
 ---|---|---|---|---|
 | Small, distant drone (193 frames) | Always FAST | 0% | 65 | 62% of frames |
@@ -171,7 +220,7 @@ streamlit run app.py
 - Clean white UI with the upload, mode and run buttons on the main page; settings and saved runs in the sidebar.
 - Upload your own video (`.mp4`, `.avi`, `.mov`, `.mkv`).
 - Choose **ADAPTIVE**, **FAST**, or **ROBUST** mode. For ADAPTIVE, pick who decides: **Random forest**,
-  **Decision tree** or **Rules**, and set the threshold for switching to ROBUST (higher saves compute, catches fewer targets).
+  **Decision tree** or **Rules**, and set the threshold for switching to ROBUST (lower is safer and uses more ROBUST, higher saves compute and misses more).
 - **Compare all modes**: one click runs Fast, Robust and Adaptive with every available selector, then opens the comparison.
 - Tune confidence threshold and test with max frames limit.
 - Play original vs annotated video side-by-side with boxes, target positions, IDs and trajectory trails.
