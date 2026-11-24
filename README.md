@@ -14,8 +14,76 @@ This project introduces a **condition-aware adaptive perception pipeline**:
 - Dynamically selects between:
   - ⚡ **FAST Mode**: Lightweight detector (`yolov8n`), lower resolution (`640x640`), frame skipping (`detect_every_n_frames=3`), ByteTrack association.
   - 🛡️ **ROBUST Mode**: High-capacity detector (`yolov8s`), high resolution (`1280x1280`), dense detection (`detect_every_n_frames=1`), ByteTrack association.
+- **A learned selector decides the mode** (ADAPTIVE): a trained **decision tree** or **random forest** reads the
+  condition features and predicts when FAST would miss targets that ROBUST catches. Hand-set threshold rules are kept
+  only as the baseline to beat.
 - **Hysteresis Smoothing**: Prevents rapid mode flipping on transient anomalies.
-- Compares **Always FAST**, **Always ROBUST**, and **ADAPTIVE** on tracking quality vs computational cost (FPS, detector calls).
+- Compares **Always FAST**, **Always ROBUST**, and **ADAPTIVE** (rules / tree / forest) on tracking quality vs
+  computational cost (detector calls, FPS).
+
+### Results
+
+Printed by `python run.py --video <clip> --compare` (see [Usage](#2-command-line-interface-cli)). Three free stock
+clips (1280x720) that the selector was **not** trained on. All runs use the default selector settings (threshold 0.5).
+*Agreement* is the share of always-ROBUST's confident targets that the run also found, so it is relative to ROBUST,
+not ground truth.
+
+**Small, distant drone** (`mixkit_44641`, 193 frames)
+
+| Run | Det calls | Det % | Robust % | Switches | Frames w/ target | Agreement |
+|---|---|---|---|---|---|---|
+| Always Fast | 65 | 33.7% | 0% | 0 | 62.2% | 62.7% |
+| Always Robust | 193 | 100% | 100% | 0 | 100% | 100% |
+| Adaptive + random forest | **164** | 85.0% | 77.2% | 5 | 100% | 100% |
+| Adaptive + decision tree | 169 | 87.6% | 80.8% | 1 | 100% | 100% |
+| Adaptive + rules | 184 | 95.3% | 92.7% | 1 | 100% | 100% |
+
+**Close-up drone** (`mixkit_44644`, 579 frames)
+
+| Run | Det calls | Det % | Robust % | Switches | Frames w/ target | Agreement |
+|---|---|---|---|---|---|---|
+| Always Fast | 193 | 33.3% | 0% | 0 | 100% | 99.3% |
+| Always Robust | 579 | 100% | 100% | 0 | 99.0% | 100% |
+| Adaptive + random forest | **203** | 35.1% | 2.6% | 2 | 99.3% | 99.7% |
+| Adaptive + decision tree | 491 | 84.8% | 77.0% | 7 | 99.8% | 100% |
+| Adaptive + rules | 570 | 98.4% | 97.6% | 1 | 99.0% | 100% |
+
+**Four fighter jets in formation** (`mixkit_7373`, 549 frames, appears to be rendered footage)
+
+| Run | Det calls | Det % | Robust % | Switches | Frames w/ target | Agreement |
+|---|---|---|---|---|---|---|
+| Always Fast | 183 | 33.3% | 0% | 0 | 98.4% | 79.2% |
+| Always Robust | 549 | 100% | 100% | 0 | 100% | 100% |
+| Adaptive + random forest | **245** | 44.6% | 16.9% | 6 | 98.4% | 83.1% |
+| Adaptive + decision tree | 536 | 97.6% | 96.5% | 2 | 100% | 99.7% |
+| Adaptive + rules | 540 | 98.4% | 97.4% | 1 | 100% | 100% |
+
+**What this shows**
+
+- **Fast alone is not enough.** On the small distant drone it loses the target in about 4 of 10 frames, and on the
+  jet formation it finds only 79% of what Robust finds.
+- **The learned selectors spend less compute than the rules** on all three clips. The rules stay in ROBUST 93-98% of
+  the time, which saves almost nothing.
+- **The random forest is the cheapest, but it trades quality for it on hard scenes.** It keeps full quality on both
+  drone clips (100% and 99.7% agreement with 15% and 65% fewer detector calls than always-Robust), but on the
+  crowded jet formation it saves 55% of detector calls and drops to 83% agreement. The decision tree is safer there
+  (99.7%) but spends nearly the full Robust budget. Raising `--threshold` makes the forest more cautious.
+- **Tracking identity is fragmented**: the formation has 4 jets but 19-22 track IDs are created, so IDs change when
+  jets overlap. ID quality is not measured by these tables.
+
+**Caveats:** one run per setting, three short clips, and a detector with no drone class (see
+[Limitations](#limitations)). FPS differs little between modes on a fast GPU, so detector calls are the compute
+measure. Treat these as a first check, not a benchmark; ground-truth metrics (HOTA/IDF1) need labelled data.
+
+---|---|---|---|---|
+| Small, distant drone (193 frames) | Always FAST | 0% | 65 | 62% of frames |
+| | Adaptive, rules | 93% | 184 | 100% |
+| | Adaptive, random forest | 77% | 164 | 100% |
+| Close-up drone (579 frames) | Adaptive, rules | 98% | 570 | 99% |
+| | Adaptive, random forest | 3% | 203 | 99% |
+
+These are two short clips and a detector that has no drone class (see [Limitations](#limitations)), so treat them as
+a first sanity check, not a benchmark.
 
 ---
 
@@ -80,7 +148,13 @@ pip install -r requirements.txt
 
 # 3. Model weights
 # yolov8n.pt and yolov8s.pt download automatically into weights/ on first run.
+
+# 4. Learned selector (weights/ is gitignored, so train it once after cloning)
+python -m src.training.train_selector
+# Without it, ADAPTIVE mode falls back to the rule-based selector with a warning.
 ```
+
+Training needs videos with real objects in `data/raw/` or `data/uploads/` (see [Test videos](#test-videos)).
 
 ---
 
@@ -94,25 +168,76 @@ streamlit run app.py
 *(Or double-click `start.bat` on Windows)*
 
 **Features:**
-- Upload your own video (`.mp4`, `.avi`, `.mov`).
-- Choose **ADAPTIVE**, **FAST**, or **ROBUST** mode.
+- Clean white UI with the upload, mode and run buttons on the main page; settings and saved runs in the sidebar.
+- Upload your own video (`.mp4`, `.avi`, `.mov`, `.mkv`).
+- Choose **ADAPTIVE**, **FAST**, or **ROBUST** mode. For ADAPTIVE, pick who decides: **Random forest**,
+  **Decision tree** or **Rules**, and set the threshold for switching to ROBUST (higher saves compute, catches fewer targets).
+- **Compare all modes**: one click runs Fast, Robust and Adaptive with every available selector, then opens the comparison.
 - Tune confidence threshold and test with max frames limit.
-- Play original vs annotated video side-by-side with trajectory trails and live HUD.
-- Inspect real-time throughput metrics (FPS, detector calls, mode switches).
-- View timeline plot of mode selections against condition features.
-- Download the browser-playable H.264 annotated video.
+- Play original vs annotated video side-by-side with boxes, target positions, IDs and trajectory trails.
+- Live preview while processing, plus speed and target-count metrics (FPS, detector calls, mode switches).
+- **Targets & paths**: flight paths and last known position of every tracked target.
+- **Conditions**: timeline of mode selections, scene features, and for learned selectors a
+  *Why it switched* view (the model's per-frame probability and its feature importance).
+- Download the annotated video and the target-position and per-frame CSVs.
 
 ### 2. Command Line Interface (CLI)
 ```bash
 # Verify environment, GPU, and model weights
 python run.py --check-setup
 
-# Run ADAPTIVE tracking on a video
+# Run ADAPTIVE tracking on a video (the selector comes from `selector.type` in config.yaml)
 python run.py --video path/to/drone_flight.mp4 --mode ADAPTIVE
 
 # Run FAST or ROBUST baseline with frame cap
 python run.py --video path/to/drone_flight.mp4 --mode FAST --max-frames 150
+
+# Pick who decides the mode in ADAPTIVE: rules, tree or forest (and the switch threshold)
+python run.py --video path/to/drone_flight.mp4 --mode ADAPTIVE --selector forest --threshold 0.7
+
+# Print the metrics table for every mode on one video (Fast, Robust, Adaptive + each selector)
+python run.py --video path/to/drone_flight.mp4 --compare
 ```
+
+`--compare` prints one table per video and saves it to `outputs/metrics/<video>_comparison.csv`:
+
+| Column | Meaning |
+|---|---|
+| Frames, Time s, FPS | Frames processed, processing time (without video re-encoding), average speed |
+| Det calls, Det % | Times the detector ran, and the share of frames that is |
+| Robust % | Share of frames spent in ROBUST mode |
+| Switches | Number of FAST/ROBUST mode changes |
+| Targets | Different targets tracked (unique track IDs) |
+| Frames w/ target % | Share of frames where at least one target was tracked |
+| Agreement % | How much of always-ROBUST's result the run keeps: the share of ROBUST's confident targets (IoU ≥ 0.5) that the run also found. Relative to ROBUST, not ground truth |
+
+---
+
+## Test videos
+
+Videos are not stored in the repo (`data/` is gitignored). Use clips with real, recognisable objects:
+
+- `data/sample_test.mp4` is a **synthetic smoke test** (plain rectangles on a blue background). The app runs on it
+  but the detector finds nothing, so no boxes are drawn. That is expected.
+- Free stock footage works well for demos, for example drones and fighter jets on
+  [Mixkit](https://mixkit.co/free-stock-video/drone/) (free under the Mixkit License). Public-domain US military
+  footage is available on [Wikimedia Commons](https://commons.wikimedia.org/) and DVIDS.
+- For training and evaluation, use labelled drone datasets such as
+  [Anti-UAV](https://github.com/ZhaoJ9014/Anti-UAV) or DUT Anti-UAV.
+
+`train_selector` scans `data/raw/` by default, so keep any clip you want as a fair held-out test outside that folder.
+
+---
+
+## Limitations
+
+- **The detectors are generic COCO models.** COCO has no "drone" class, so drones are usually labelled "airplane",
+  and small or distant drones are often missed. Fine-tuning YOLO on a UAV dataset is the biggest open improvement.
+- **The selector's labels come from the detectors**, so it should be retrained (`python -m src.training.train_selector`)
+  whenever the detector weights change.
+- **Training data is small.** The first selector was trained on one real video plus condition-varied copies, so its
+  cross-validated scores are optimistic. Add more varied footage and retrain before drawing conclusions.
+- On a fast GPU, FAST and ROBUST run at similar fps, so **detector calls** are the more meaningful compute measure.
 
 ---
 

@@ -38,6 +38,7 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_m
 from sklearn.model_selection import GroupKFold
 from sklearn.tree import DecisionTreeClassifier, export_text
 
+from src.evaluation.metrics import frame_agreement
 from src.selector.selector import ROLLING_WINDOW, RollingFeatures, RuleBasedSelector
 from src.utils.config import load_config
 
@@ -109,46 +110,6 @@ def make_condition_variant(src: Union[str, Path], dst: Union[str, Path], seed: i
 # ----------------------------------------------------------------------------
 # 2. Teacher labels
 # ----------------------------------------------------------------------------
-def _iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    """IoU matrix between boxes a (N,4) and b (M,4) in x1,y1,x2,y2."""
-    x1 = np.maximum(a[:, None, 0], b[None, :, 0])
-    y1 = np.maximum(a[:, None, 1], b[None, :, 1])
-    x2 = np.minimum(a[:, None, 2], b[None, :, 2])
-    y2 = np.minimum(a[:, None, 3], b[None, :, 3])
-    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
-    area_a = (a[:, 2] - a[:, 0]) * (a[:, 3] - a[:, 1])
-    area_b = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
-    return inter / (area_a[:, None] + area_b[None, :] - inter + 1e-9)
-
-
-def frame_agreement(fast_tracks: pd.DataFrame, robust_tracks: pd.DataFrame, n_frames: int,
-                    teacher_conf: float = 0.5, iou_thr: float = 0.5) -> np.ndarray:
-    """Per frame: share of ROBUST's confident targets that FAST also found (1.0 if none)."""
-    cols = ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]
-    fast_by = {f: g[cols].to_numpy(float) for f, g in fast_tracks.groupby("frame")} if len(fast_tracks) else {}
-    teach = robust_tracks[robust_tracks["confidence"] >= teacher_conf] if len(robust_tracks) else robust_tracks
-    robust_by = {f: g[cols].to_numpy(float) for f, g in teach.groupby("frame")} if len(teach) else {}
-
-    agree = np.ones(n_frames, dtype=float)
-    for f, rb in robust_by.items():
-        if f >= n_frames:
-            continue
-        fb = fast_by.get(f)
-        if fb is None or len(fb) == 0:
-            agree[f] = 0.0
-            continue
-        iou = _iou(rb, fb)
-        matched, free = 0, np.ones(len(fb), dtype=bool)
-        for r in np.argsort(-iou.max(axis=1)):  # greedy one-to-one matching, best overlaps first
-            cand = np.where(free, iou[r], -1.0)
-            j = int(cand.argmax())
-            if cand[j] >= iou_thr:
-                free[j] = False
-                matched += 1
-        agree[f] = matched / len(rb)
-    return agree
-
-
 def forward_window_mean(values: np.ndarray, window: int) -> np.ndarray:
     """Mean of values[t : t+window] for every t (shorter at the end)."""
     csum = np.concatenate([[0.0], np.cumsum(values)])
@@ -217,7 +178,7 @@ def build_labels(
         r_sum = robust.run_video(clip, max_frames=max_frames, save_outputs=False)
 
         frames = min(len(f_sum["records_df"]), len(r_sum["records_df"]))
-        agree = frame_agreement(f_sum["tracks_df"], r_sum["tracks_df"], frames, teacher_conf)
+        agree = frame_agreement(f_sum["tracks_df"], r_sum["tracks_df"], frames, reference_conf=teacher_conf)
         future = forward_window_mean(agree, window)
         label = np.where(future >= tau, "FAST", "ROBUST")
 

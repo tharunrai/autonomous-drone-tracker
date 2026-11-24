@@ -36,6 +36,79 @@ def compute_detector_call_ratio(detector_calls: int, total_frames: int) -> float
     return float(detector_calls / total_frames)
 
 
+def _iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """IoU matrix between boxes a (N,4) and b (M,4) in x1,y1,x2,y2."""
+    x1 = np.maximum(a[:, None, 0], b[None, :, 0])
+    y1 = np.maximum(a[:, None, 1], b[None, :, 1])
+    x2 = np.minimum(a[:, None, 2], b[None, :, 2])
+    y2 = np.minimum(a[:, None, 3], b[None, :, 3])
+    inter = np.clip(x2 - x1, 0, None) * np.clip(y2 - y1, 0, None)
+    area_a = (a[:, 2] - a[:, 0]) * (a[:, 3] - a[:, 1])
+    area_b = (b[:, 2] - b[:, 0]) * (b[:, 3] - b[:, 1])
+    return inter / (area_a[:, None] + area_b[None, :] - inter + 1e-9)
+
+
+def frame_agreement(tracks: pd.DataFrame, reference_tracks: pd.DataFrame, n_frames: int,
+                    reference_conf: float = 0.5, iou_thr: float = 0.5) -> np.ndarray:
+    """Per frame: share of the reference's confident targets that ``tracks`` also found.
+
+    A frame where the reference has no confident target counts as 1.0 (nothing to miss).
+    With always-ROBUST as the reference this measures how much of the careful setup's
+    result a cheaper run keeps. It is not ground-truth accuracy (that needs labelled
+    boxes, see run_trackeval).
+    """
+    cols = ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]
+    found = {f: g[cols].to_numpy(float) for f, g in tracks.groupby("frame")} if len(tracks) else {}
+    ref = reference_tracks[reference_tracks["confidence"] >= reference_conf] if len(reference_tracks) else reference_tracks
+    ref_by = {f: g[cols].to_numpy(float) for f, g in ref.groupby("frame")} if len(ref) else {}
+
+    agree = np.ones(n_frames, dtype=float)
+    for f, rb in ref_by.items():
+        if f >= n_frames:
+            continue
+        fb = found.get(f)
+        if fb is None or len(fb) == 0:
+            agree[f] = 0.0
+            continue
+        iou = _iou(rb, fb)
+        matched, free = 0, np.ones(len(fb), dtype=bool)
+        for r in np.argsort(-iou.max(axis=1)):  # greedy one-to-one matching, best overlaps first
+            cand = np.where(free, iou[r], -1.0)
+            j = int(cand.argmax())
+            if cand[j] >= iou_thr:
+                free[j] = False
+                matched += 1
+        agree[f] = matched / len(rb)
+    return agree
+
+
+def run_metrics(summary: Dict[str, Any], reference: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Headline numbers for one TrackingPipeline.run_video() summary.
+
+    Args:
+        summary: Dictionary returned by run_video.
+        reference: Summary of the always-ROBUST run on the same video, to score agreement.
+    """
+    frames, tracks = summary["records_df"], summary["tracks_df"]
+    n = max(1, summary["total_frames"])
+    out = {
+        "frames": summary["total_frames"],
+        "seconds": summary["total_time_seconds"],
+        "fps": summary["avg_fps"],
+        "detector_calls": summary["detector_calls"],
+        "detector_pct": round(summary["detector_call_ratio"] * 100, 1),
+        "robust_pct": round(float((frames["mode"] == "ROBUST").mean() * 100), 1) if len(frames) else 0.0,
+        "switches": summary["mode_switches"],
+        "targets": summary.get("total_unique_targets", 0),
+        "frames_with_target_pct": round(tracks["frame"].nunique() / n * 100, 1) if len(tracks) else 0.0,
+        "mean_targets_per_frame": round(float(frames["num_tracks"].mean()), 2) if len(frames) else 0.0,
+    }
+    if reference is not None:
+        agree = frame_agreement(tracks, reference["tracks_df"], len(reference["records_df"]))
+        out["agreement_pct"] = round(float(agree.mean() * 100), 1)
+    return out
+
+
 def summarize_run_metrics(metrics_df: pd.DataFrame) -> Dict[str, Any]:
     """Compute summary statistics from a pipeline run's per-frame records.
 
