@@ -65,8 +65,9 @@ class ByteTrackerWrapper:
                 continue
 
             track_id = int(track.track_id)
-            tlbr = track.tlbr
-            x1, y1, x2, y2 = float(tlbr[0]), float(tlbr[1]), float(tlbr[2]), float(tlbr[3])
+            # Ultralytics 8.1+ calls the corner box `xyxy`; older releases called it `tlbr`.
+            corners = track.xyxy if hasattr(track, "xyxy") else track.tlbr
+            x1, y1, x2, y2 = (float(v) for v in corners[:4])
             conf = float(track.score)
             cls_id = int(getattr(track, "cls", 0))
 
