@@ -18,7 +18,8 @@ import joblib
 import numpy as np
 
 # Per-frame features produced by ConditionFeatureExtractor that the learned selectors use.
-BASE_FEATURES = ["blur", "mean_brightness", "box_area_ratio", "mean_confidence", "camera_motion"]
+BASE_FEATURES = ["blur", "mean_brightness", "box_area_ratio", "mean_confidence", "camera_motion",
+                 "num_tracks", "frames_since_target"]
 ROLLING_WINDOW = 15  # frames averaged into the "_avg" features
 
 SELECTOR_LABELS = {"rules": "Rules", "tree": "Decision tree", "forest": "Random forest"}
@@ -34,16 +35,23 @@ class RollingFeatures:
     inputs with this class, so the model always sees exactly the same columns.
     """
 
-    def __init__(self, window: int = ROLLING_WINDOW) -> None:
+    def __init__(self, window: int = ROLLING_WINDOW, base: Optional[List[str]] = None) -> None:
         self.window = window
+        self.base = list(base or BASE_FEATURES)
         self.history: deque = deque(maxlen=window)
 
     @staticmethod
-    def names() -> List[str]:
-        return BASE_FEATURES + [f"{n}_avg" for n in BASE_FEATURES]
+    def names(base: Optional[List[str]] = None) -> List[str]:
+        base = list(base or BASE_FEATURES)
+        return base + [f"{n}_avg" for n in base]
+
+    @staticmethod
+    def base_from_names(names: List[str]) -> List[str]:
+        """Inverse of names(): the per-frame features a saved model was trained on."""
+        return [n for n in names if not n.endswith("_avg")]
 
     def update(self, features: Dict[str, float]) -> List[float]:
-        row = [float(features.get(n, 0.0)) for n in BASE_FEATURES]
+        row = [float(features.get(n, 0.0)) for n in self.base]
         self.history.append(row)
         return row + np.mean(self.history, axis=0).tolist()
 
@@ -195,7 +203,9 @@ class MLSelector:
         # which cost ~30 ms per row for a 100-tree forest (vs well under 1 ms this way).
         self._trees = [est.tree_ for est in getattr(self.model, "estimators_", [self.model])]
         self.decide_every = int(decide_every or bundle.get("decide_every", 3))
-        self.rolling = RollingFeatures(int(bundle.get("window", ROLLING_WINDOW)))
+        # Build exactly the columns this model was trained on (older bundles have fewer).
+        self.rolling = RollingFeatures(int(bundle.get("window", ROLLING_WINDOW)),
+                                       base=RollingFeatures.base_from_names(self.feature_names))
         self._robust_col = list(self.model.classes_).index("ROBUST")
         self._frame = 0
         self._last_mode = "FAST"

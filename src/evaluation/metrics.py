@@ -82,6 +82,62 @@ def frame_agreement(tracks: pd.DataFrame, reference_tracks: pd.DataFrame, n_fram
     return agree
 
 
+# ----------------------------------------------------------------------------
+# Ground truth (Anti-UAV style: <video>.json next to <video>.mp4)
+# ----------------------------------------------------------------------------
+def find_ground_truth(video: Union[str, Path]) -> Optional[Path]:
+    """The label file for a video, if there is one (visible.mp4 -> visible.json)."""
+    p = Path(video).with_suffix(".json")
+    return p if p.is_file() else None
+
+
+def load_ground_truth(path: Union[str, Path]) -> np.ndarray:
+    """Per-frame target box as x1,y1,x2,y2, NaN where the target is absent.
+
+    Reads the Anti-UAV format: {"exist": [0|1, ...], "gt_rect": [[x, y, w, h], ...]}.
+    """
+    import json
+
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    rects, exist = data.get("gt_rect", []), data.get("exist", [])
+    out = np.full((len(rects), 4), np.nan)
+    for i, r in enumerate(rects):
+        present = bool(exist[i]) if i < len(exist) else bool(r)
+        if present and r and len(r) == 4 and r[2] > 0 and r[3] > 0:
+            out[i] = (r[0], r[1], r[0] + r[2], r[1] + r[3])
+    return out
+
+
+def gt_hits(tracks: pd.DataFrame, gt_boxes: np.ndarray, n_frames: int, iou_thr: float = 0.5) -> np.ndarray:
+    """Per frame: 1 if a track overlaps the true target (IoU >= iou_thr), 0 if missed,
+    NaN if the target is not in the frame."""
+    cols = ["bbox_x1", "bbox_y1", "bbox_x2", "bbox_y2"]
+    found = {f: g[cols].to_numpy(float) for f, g in tracks.groupby("frame")} if len(tracks) else {}
+    hits = np.full(n_frames, np.nan)
+    for f in range(min(n_frames, len(gt_boxes))):
+        g = gt_boxes[f]
+        if np.isnan(g).any():
+            continue
+        fb = found.get(f)
+        hits[f] = float(fb is not None and len(fb) > 0 and _iou(g[None, :], fb).max() >= iou_thr)
+    return hits
+
+
+def gt_scores(tracks: pd.DataFrame, gt_boxes: np.ndarray, n_frames: int, iou_thr: float = 0.5) -> Dict[str, float]:
+    """Recall (share of target frames where it was found) and precision (share of output
+    boxes that are the target) against ground truth."""
+    hits = gt_hits(tracks, gt_boxes, n_frames, iou_thr)
+    present = int(np.sum(~np.isnan(hits)))
+    found = int(np.nansum(hits))
+    boxes = int((tracks["frame"] < n_frames).sum()) if len(tracks) else 0
+    return {
+        "gt_frames": present,
+        "recall": round(found / present, 4) if present else float("nan"),
+        "precision": round(found / boxes, 4) if boxes else float("nan"),
+        "false_boxes_per_frame": round((boxes - found) / max(1, n_frames), 3),
+    }
+
+
 def run_metrics(summary: Dict[str, Any], reference: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Headline numbers for one TrackingPipeline.run_video() summary.
 

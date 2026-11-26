@@ -38,12 +38,21 @@ from sklearn.metrics import accuracy_score, balanced_accuracy_score, confusion_m
 from sklearn.model_selection import GroupKFold
 from sklearn.tree import DecisionTreeClassifier, export_text
 
-from src.evaluation.metrics import frame_agreement
+from src.evaluation.metrics import find_ground_truth, frame_agreement, gt_hits, load_ground_truth
 from src.selector.selector import ROLLING_WINDOW, RollingFeatures, RuleBasedSelector
 from src.utils.config import load_config
 
 VIDEO_TYPES = (".mp4", ".avi", ".mov", ".mkv")
 CONDITIONS = ["clean", "blur", "shake", "tiny", "dark", "noise"]
+# Conditions that leave every pixel where it was, so a clip's ground-truth boxes still
+# fit the condition-varied copy. "shake" and "tiny" move the target and are skipped then.
+GEOMETRY_SAFE = ["clean", "blur", "dark", "noise"]
+
+
+def clip_id(video: Union[str, Path]) -> str:
+    """Unique name for a clip. Datasets that call every file visible.mp4 use the folder name."""
+    p = Path(video)
+    return p.parent.name if p.stem.lower() in ("visible", "infrared", "video") else p.stem
 
 
 # ----------------------------------------------------------------------------
@@ -83,8 +92,10 @@ def _apply_condition(frame: np.ndarray, condition: str, strength: float, rng: np
 
 
 def make_condition_variant(src: Union[str, Path], dst: Union[str, Path], seed: int,
-                           segment_frames: int = 90, max_frames: Optional[int] = None) -> List[str]:
+                           segment_frames: int = 90, max_frames: Optional[int] = None,
+                           conditions: Optional[List[str]] = None) -> List[str]:
     """Write a copy of ``src`` where each segment has a random condition. Returns the schedule."""
+    conditions = conditions or CONDITIONS
     rng = np.random.default_rng(seed)
     cap = cv2.VideoCapture(str(src))
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -98,7 +109,7 @@ def make_condition_variant(src: Union[str, Path], dst: Union[str, Path], seed: i
         if not ok:
             break
         if i % segment_frames == 0:
-            condition, strength, state = str(rng.choice(CONDITIONS)), float(rng.uniform()), {}
+            condition, strength, state = str(rng.choice(conditions)), float(rng.uniform()), {}
         schedule.append(condition)
         out.write(_apply_condition(frame, condition, strength, rng, state))
         i += 1
@@ -118,6 +129,17 @@ def forward_window_mean(values: np.ndarray, window: int) -> np.ndarray:
     return (csum[end] - csum[idx]) / (end - idx)
 
 
+def forward_window_nanmean(values: np.ndarray, window: int):
+    """Like forward_window_mean but ignoring NaN. Returns (mean, count of non-NaN values)."""
+    valid = ~np.isnan(values)
+    s = forward_window_mean(np.where(valid, values, 0.0), window)
+    c = forward_window_mean(valid.astype(float), window)
+    span = np.minimum(np.arange(len(values)) + window, len(values)) - np.arange(len(values))
+    count = np.rint(c * span)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        return np.where(count > 0, s / np.maximum(c, 1e-12), np.nan), count
+
+
 def _rolling_rows(records: pd.DataFrame) -> np.ndarray:
     roll = RollingFeatures(ROLLING_WINDOW)
     return np.asarray([roll.update(r) for r in records.to_dict("records")], dtype=float)
@@ -132,7 +154,7 @@ def find_videos(roots: Iterable[Union[str, Path]]) -> List[Path]:
         for p in files:
             if p.suffix.lower() not in VIDEO_TYPES or p.name.startswith("temp_raw_"):
                 continue
-            key = (p.name, p.stat().st_size)
+            key = (clip_id(p), p.stat().st_size)
             if key not in seen:
                 seen.add(key)
                 found.append(p)
@@ -147,52 +169,77 @@ def build_labels(
     window: int = 15,
     tau: float = 0.8,
     teacher_conf: float = 0.5,
+    min_gain: float = 0.2,
     max_frames: Optional[int] = None,
     config_path: Union[str, Path] = "config.yaml",
 ) -> pd.DataFrame:
-    """Make the selector training table: one row per frame per pass, with a FAST/ROBUST label."""
+    """Make the selector training table: one row per frame per pass, with a FAST/ROBUST label.
+
+    Clips with ground truth (``<video>.json`` next to the video) are labelled against it:
+    a frame is ROBUST when, over the next ``window`` frames, FAST finds the real target in
+    less than ``tau`` of the frames it is present AND ROBUST finds it in at least
+    ``min_gain`` more of them. So ROBUST is asked for only where it actually helps; if
+    neither setup finds the target, paying for ROBUST would be wasted and the label is FAST.
+    Clips without ground truth fall back to the ROBUST-as-teacher agreement label.
+    """
     from src.pipeline.pipeline import Mode, TrackingPipeline  # heavy import, only when labelling
 
     videos = [Path(v) for v in (videos or find_videos(["data/uploads", "data/raw", "data/sample_test.mp4"]))]
     if not videos:
         raise FileNotFoundError("No videos found. Put flight videos in data/raw/ or data/uploads/.")
 
-    clips: List[Path] = []
+    clips: List[tuple] = []  # (clip path, clip name, source name, ground-truth path or None)
     for v in videos:
-        clips.append(v)
+        gt = find_ground_truth(v)
+        cid = clip_id(v)
+        clips.append((v, cid, cid, gt))
         for k in range(variants_per_video):
-            dst = Path(variants_dir) / f"{v.stem}__var{k}.mp4"
+            dst = Path(variants_dir) / f"{cid}__var{k}.mp4"
             if not dst.is_file():
                 print(f"  making condition-varied copy {dst.name}")
-                make_condition_variant(v, dst, seed=1000 + k, max_frames=max_frames)
-            clips.append(dst)
+                make_condition_variant(v, dst, seed=1000 + k, max_frames=max_frames,
+                                       conditions=GEOMETRY_SAFE if gt else None)
+            clips.append((dst, dst.stem, cid, gt))
 
     fast = TrackingPipeline(Mode.FAST, config_path=config_path)
     robust = TrackingPipeline(Mode.ROBUST, config_path=config_path)
     names = RollingFeatures.names()
     tables = []
-    for n, clip in enumerate(clips, 1):
-        print(f"[{n}/{len(clips)}] {clip.name}: FAST pass...", flush=True)
+    for n, (clip, cname, source_name, gt_path) in enumerate(clips, 1):
+        print(f"[{n}/{len(clips)}] {cname}: FAST pass...", flush=True)
         f_sum = fast.run_video(clip, max_frames=max_frames, save_outputs=False)
-        print(f"[{n}/{len(clips)}] {clip.name}: ROBUST pass...", flush=True)
+        print(f"[{n}/{len(clips)}] {cname}: ROBUST pass...", flush=True)
         r_sum = robust.run_video(clip, max_frames=max_frames, save_outputs=False)
 
         frames = min(len(f_sum["records_df"]), len(r_sum["records_df"]))
         agree = frame_agreement(f_sum["tracks_df"], r_sum["tracks_df"], frames, reference_conf=teacher_conf)
-        future = forward_window_mean(agree, window)
-        label = np.where(future >= tau, "FAST", "ROBUST")
+        if gt_path is not None:
+            gt_boxes = load_ground_truth(gt_path)
+            fast_rec, present = forward_window_nanmean(gt_hits(f_sum["tracks_df"], gt_boxes, frames), window)
+            robust_rec, _ = forward_window_nanmean(gt_hits(r_sum["tracks_df"], gt_boxes, frames), window)
+            need = (present > 0) & (np.nan_to_num(fast_rec, nan=1.0) < tau) & \
+                   (np.nan_to_num(robust_rec, nan=0.0) - np.nan_to_num(fast_rec, nan=1.0) >= min_gain)
+            label = np.where(need, "ROBUST", "FAST")
+            future, label_source = fast_rec, "ground_truth"
+        else:
+            future = forward_window_mean(agree, window)
+            robust_rec = np.full(frames, np.nan)
+            label = np.where(future >= tau, "FAST", "ROBUST")
+            label_source = "robust_teacher"
 
         for source, summ in (("fast_pass", f_sum), ("robust_pass", r_sum)):
             rows = pd.DataFrame(_rolling_rows(summ["records_df"].iloc[:frames]), columns=names)
             rows["frame"] = np.arange(frames)
             rows["agreement"] = agree.round(3)
-            rows["future_agreement"] = future.round(3)
+            rows["future_agreement"] = np.round(future, 3)
+            rows["future_robust_recall"] = np.round(robust_rec, 3)
             rows["label"] = label
-            rows["clip"] = clip.stem
-            rows["source_video"] = clip.stem.split("__var")[0]
+            rows["label_source"] = label_source
+            rows["clip"] = cname
+            rows["source_video"] = source_name
             rows["pass"] = source
             tables.append(rows)
-        print(f"    {frames} frames, ROBUST needed on {np.mean(label == 'ROBUST') * 100:.0f}% of them")
+        print(f"    {frames} frames ({label_source}), ROBUST needed on {np.mean(label == 'ROBUST') * 100:.0f}% of them")
 
     table = pd.concat(tables, ignore_index=True)
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
@@ -233,7 +280,10 @@ def train_selector(
     """Fit a decision tree and a random forest, compare them with the rules, save both."""
     data = pd.read_csv(training_data_path)
     names = RollingFeatures.names()
-    X, y, groups = data[names].to_numpy(float), data["label"].to_numpy(), data["clip"].to_numpy()
+    # Group by source video, so a clip and its condition-varied copies stay on the same side
+    # of every cross-validation split.
+    group_col = "source_video" if "source_video" in data else "clip"
+    X, y, groups = data[names].to_numpy(float), data["label"].to_numpy(), data[group_col].to_numpy()
     if len(set(y)) < 2:
         raise ValueError(f"Every label is '{y[0]}'. The selector needs both FAST and ROBUST examples: "
                          "add more varied videos or change --tau.")
@@ -308,13 +358,19 @@ def main() -> None:
     p.add_argument("--max-frames", type=int, default=None, help="cap frames per clip (quick runs)")
     p.add_argument("--window", type=int, default=15, help="frames ahead the label looks at")
     p.add_argument("--tau", type=float, default=0.8, help="share of ROBUST's targets FAST must find")
+    p.add_argument("--min-gain", type=float, default=0.2,
+                   help="ground-truth labels: how much more ROBUST must find before it is worth asking for")
+    p.add_argument("--videos-file", help="text file with one video path per line")
     p.add_argument("--skip-labels", action="store_true", help="reuse data/processed/training_labels.csv")
     args = p.parse_args()
 
     if not args.skip_labels:
-        videos = find_videos(args.videos) if args.videos else None
+        roots = list(args.videos or [])
+        if args.videos_file:
+            roots += [l.strip() for l in Path(args.videos_file).read_text(encoding="utf-8").splitlines() if l.strip()]
+        videos = find_videos(roots) if roots else None
         build_labels(videos, variants_per_video=args.variants, window=args.window,
-                     tau=args.tau, max_frames=args.max_frames)
+                     tau=args.tau, min_gain=args.min_gain, max_frames=args.max_frames)
     _print_summary(train_selector())
 
 

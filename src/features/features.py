@@ -17,6 +17,9 @@ class ConditionFeatureExtractor:
         self.downscale_width = downscale_flow_width
         self.prev_gray_small: Optional[np.ndarray] = None
         self.dis_flow = cv2.DISOpticalFlow_create(cv2.DISOPTICAL_FLOW_PRESET_FAST)
+        self.max_gap = 60  # cap for frames_since_target
+        self.frames_since_target = self.max_gap
+        self.seen_target = False
 
     def extract(
         self,
@@ -78,15 +81,31 @@ class ConditionFeatureExtractor:
 
         self.prev_gray_small = curr_gray_small
 
+        # 6. Track state: how many targets are tracked, and for how long nothing has been.
+        # A target that was there and is suddenly gone is the clearest sign the running
+        # detector is missing it, so the selector can react to it directly.
+        num_tracks = len(tracks) if tracks else 0
+        if num_tracks:
+            self.frames_since_target = 0
+            self.seen_target = True
+        else:
+            self.frames_since_target = min(self.frames_since_target + 1, self.max_gap)
+
         return {
             "blur": round(laplacian_var, 2),
             "mean_brightness": round(mean_brightness, 2),
             "box_area_ratio": round(box_area_ratio, 6),
             "mean_confidence": round(mean_confidence, 4),
             "camera_motion": round(camera_motion, 4),
+            "num_tracks": float(num_tracks),
+            # Frames since a target was last tracked (capped). Before any target is seen it
+            # stays at the cap, so "never seen" and "lost long ago" look the same.
+            "frames_since_target": float(self.frames_since_target if self.seen_target else self.max_gap),
         }
 
     def reset(self) -> None:
-        """Reset historical optical flow state."""
+        """Reset historical optical flow and track-gap state."""
         self.prev_gray_small = None
+        self.frames_since_target = self.max_gap
+        self.seen_target = False
 
