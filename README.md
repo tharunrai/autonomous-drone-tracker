@@ -140,7 +140,8 @@ a first sanity check, not a benchmark.
 
 ```
 .
-├── app.py                      # Interactive Streamlit UI (video upload, playback, telemetry)
+├── app.py                      # Streamlit entry point: routes Home and Tracker pages
+├── app_pages/                  # home.py (landing page), tracker.py (upload, playback, telemetry)
 ├── run.py                      # CLI runner (--video PATH --mode FAST|ROBUST|ADAPTIVE)
 ├── config.yaml                 # Central configuration (modes, thresholds, hysteresis)
 ├── requirements.txt            # Python dependencies
